@@ -6,7 +6,6 @@ import (
 	"log"
 	"net"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -51,14 +50,7 @@ func NewService() (*Service, error) {
 		return nil, err
 	}
 
-	file, err := conn.File()
-	if err == nil {
-		fd := int(file.Fd())
-		if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1); err != nil {
-			log.Printf("Warning: failed to set SO_BROADCAST: %v", err)
-		}
-		file.Close()
-	}
+	setBroadcastOption(conn)
 
 	localIP, broadcastAddr, err := getLocalIPAndBroadcast()
 	if err != nil {
