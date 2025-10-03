@@ -181,6 +181,9 @@
         <div class="header">
             <h1>🪙 GrimCoin</h1>
             <p>Наблюдатель децентрализованной платёжной сети</p>
+            <div style="background-color: rgba(255,255,255,0.2); padding: 10px; border-radius: 5px; margin: 15px 0;">
+                <strong>📶 WiFi:</strong> Coldspot | <strong>🔑 Пароль:</strong> alohomora
+            </div>
             <div id="connection-status" class="status connecting">🔄 Подключение к контроллеру...</div>
         </div>
 
@@ -260,7 +263,7 @@
             connect() {
                 try {
                     // Пытаемся подключиться к WebSocket серверу контроллера
-                    const wsUrl = 'ws://195.19.42.254:8080/ws';
+                    const wsUrl = 'ws://10.92.28.89:8080/ws';
                     this.socket = new WebSocket(wsUrl);
                     
                     this.socket.onopen = (event) => {
