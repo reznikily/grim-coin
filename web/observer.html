@@ -260,7 +260,7 @@
             connect() {
                 try {
                     // Пытаемся подключиться к WebSocket серверу контроллера
-                    const wsUrl = 'ws://localhost:8080/ws';
+                    const wsUrl = 'ws://195.19.42.254:8080/ws';
                     this.socket = new WebSocket(wsUrl);
                     
                     this.socket.onopen = (event) => {
