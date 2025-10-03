@@ -81,7 +81,7 @@ func NewServiceWithIP(preferredIP string) (*Service, error) {
 		}
 	}
 
-	log.Printf("Discovery service: local IP %s, broadcast %s", localIP, broadcastAddr)
+	// Discovery service initialized
 
 	return &Service{
 		conn:          conn,
@@ -94,14 +94,14 @@ func NewServiceWithIP(preferredIP string) (*Service, error) {
 func (s *Service) StartListening() {
 	buf := make([]byte, 1024)
 	for {
-		n, remoteAddr, err := s.conn.ReadFromUDP(buf)
+		n, _, err := s.conn.ReadFromUDP(buf)
 		if err != nil {
 			continue
 		}
 
 		var ann Announcement
 		if err := json.Unmarshal(buf[:n], &ann); err != nil {
-			log.Printf("Failed to parse announcement from %s: %v", remoteAddr, err)
+			// Failed to parse announcement (silently ignored)
 			continue
 		}
 
@@ -109,8 +109,7 @@ func (s *Service) StartListening() {
 			continue
 		}
 
-		log.Printf("Received %s announcement from %s (ID: %d, Name: %s)", 
-			ann.Type, ann.IP, ann.ID, ann.Name)
+		// Received announcement (no log to avoid spam)
 
 		s.mutex.RLock()
 		for _, ch := range s.listeners {
@@ -154,12 +153,12 @@ func (s *Service) Announce(ann *Announcement) error {
 		return err
 	}
 
-	n, err := broadcastConn.Write(data)
+	_, err = broadcastConn.Write(data)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("Sent %s announcement to %s (%d bytes)", ann.Type, s.broadcastAddr, n)
+	// Announcement sent (no log to avoid spam)
 	return nil
 }
 
@@ -169,7 +168,7 @@ func (s *Service) StartAnnouncing(ann *Announcement, interval time.Duration) {
 
 	for range ticker.C {
 		if err := s.Announce(ann); err != nil {
-			log.Printf("Failed to announce: %v", err)
+			// Failed to announce (silently ignored)
 		}
 	}
 }

@@ -708,6 +708,13 @@ func (s *Server) broadcastNetworkState() {
 		log.Printf("Failed to create network state envelope: %v", err)
 		return
 	}
+	
+	log.Printf("Broadcasting to %d observers: %d nodes", len(observersCopy), len(nodes))
+	for i, node := range nodes {
+		log.Printf("  Node %d: ID=%d, Name=%s, Balance=%d, Version=%d, Status=%s", 
+			i, node.ID, node.Name, node.Balance, node.Version, node.Status)
+	}
+	
 	for _, observer := range observersCopy {
 		if err := observer.WriteJSON(envelope); err != nil {
 			log.Printf("Failed to send network state to observer: %v", err)
@@ -876,13 +883,16 @@ func (s *Server) waitAndVerifyStates(txID string, expectedCount int) {
 	s.mutex.Lock()
 	for id, state := range states {
 		if wallet, ok := s.wallets[id]; ok {
+			oldBalance := wallet.Balance
 			if bal, exists := state.Balances[id]; exists {
 				wallet.Balance = bal
+				log.Printf("Updated wallet %d balance: %d -> %d", id, oldBalance, bal)
 			}
 			wallet.Version = state.Version
 		}
 	}
 	s.mutex.Unlock()
 
+	log.Printf("Broadcasting updated network state to %d observers", len(s.observers))
 	s.broadcastNetworkState()
 }
