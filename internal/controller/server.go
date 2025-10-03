@@ -89,14 +89,10 @@ func getPublicIP() (string, error) {
 	return "", fmt.Errorf("failed to get public IP from any service")
 }
 func (s *Server) Start(ctx context.Context, localIP string) error {
-	// Get public IP address
-	publicIP, err := getPublicIP()
-	if err != nil {
-		log.Printf("Warning: failed to get public IP, using local IP instead: %v", err)
-		publicIP = localIP
-	}
-	s.publicIP = publicIP
-	log.Printf("Public IP address: %s", publicIP)
+	// Use local IP for WebSocket connections (instead of public IP)
+	// This is necessary for local network communication
+	s.publicIP = localIP
+	log.Printf("Using IP address: %s", localIP)
 
 	disc, err := discovery.NewServiceWithIP(localIP)
 	if err != nil {
@@ -133,7 +129,7 @@ func (s *Server) Start(ctx context.Context, localIP string) error {
 
 	go func() {
 		log.Printf("Starting observer server on 0.0.0.0:8080")
-		log.Printf("Observer UI available at: http://%s:8080", publicIP)
+		log.Printf("Observer UI available at: http://%s:8080", localIP)
 		if err := observerServer.ListenAndServe(); err != http.ErrServerClosed {
 			log.Printf("Observer server error: %v", err)
 		}
@@ -387,6 +383,9 @@ func (s *Server) handleObserverHTML(w http.ResponseWriter, r *http.Request) {
         <div class="header">
             <h1>🪙 GrimCoin</h1>
             <p>Наблюдатель децентрализованной платёжной сети</p>
+            <div style="background-color: rgba(255,255,255,0.2); padding: 10px; border-radius: 5px; margin: 15px 0;">
+                <strong>📶 WiFi:</strong> Coldspot | <strong>🔑 Пароль:</strong> alohomora
+            </div>
             <div id="connection-status" class="status connecting">🔄 Подключение к контроллеру...</div>
         </div>
 
