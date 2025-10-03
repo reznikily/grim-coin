@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"time"
 )
-
-// Envelope - общая оболочка для всех сообщений
 type Envelope struct {
 	Type     string          `json:"type"`
 	SenderID int             `json:"sender_id"`
@@ -13,8 +11,6 @@ type Envelope struct {
 	TxID     string          `json:"tx_id,omitempty"`
 	Payload  json.RawMessage `json:"payload"`
 }
-
-// HelloPayload - сообщение при подключении кошелька к контроллеру
 type HelloPayload struct {
 	ID      int    `json:"id"`
 	Name    string `json:"name"`
@@ -22,53 +18,76 @@ type HelloPayload struct {
 	Balance int    `json:"balance"`
 	Version int    `json:"version"`
 }
-
-// NetworkStatePayload - состояние сети для веб-клиента
 type NetworkStatePayload struct {
 	Nodes     []NodeInfo `json:"nodes"`
 	Timestamp time.Time  `json:"timestamp"`
 }
-
-// NodeInfo - информация об узле в сети
 type NodeInfo struct {
 	ID      int    `json:"id"`
 	Name    string `json:"name"`
 	IP      string `json:"ip"`
 	Balance int    `json:"balance"`
 	Version int    `json:"version"`
-	Status  string `json:"status"` // "online" или "offline"
+	Status  string `json:"status"`
 }
-
-// StateUpdatePayload - обновление локального состояния
 type StateUpdatePayload struct {
 	Balance int `json:"balance"`
 	Version int `json:"version"`
 }
-
-// AckPayload - подтверждение получения сообщения
 type AckPayload struct {
 	MessageType string `json:"message_type"`
 	Success     bool   `json:"success"`
 	Message     string `json:"message,omitempty"`
 }
-
-// ErrorPayload - сообщение об ошибке
 type ErrorPayload struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Details string `json:"details,omitempty"`
 }
 
-// Константы типов сообщений для этапа 1
-const (
-	MsgTypeHello        = "hello"
-	MsgTypeStateUpdate  = "state_update"
-	MsgTypeNetworkState = "network_state"
-	MsgTypeAck          = "ack"
-	MsgTypeError        = "error"
-)
+type LockRequestPayload struct {
+	TxID string `json:"tx_id"`
+}
 
-// CreateEnvelope - создает новый Envelope с заданными параметрами
+type LockGrantedPayload struct {
+	TxID  string `json:"tx_id"`
+	TTLMs int    `json:"ttl_ms"`
+}
+
+type TransactionPayload struct {
+	From    int `json:"from"`
+	To      int `json:"to"`
+	Amount  int `json:"amount"`
+	Version int `json:"version"`
+}
+
+type CommitNoticePayload struct {
+	TxID string `json:"tx_id"`
+}
+
+type StatePushRequestPayload struct {
+	TxID string `json:"tx_id"`
+}
+
+type StatePushResponsePayload struct {
+	Balances map[int]int `json:"balances"`
+	Version  int         `json:"version"`
+}
+
+const (
+	MsgTypeHello            = "hello"
+	MsgTypeStateUpdate      = "state_update"
+	MsgTypeNetworkState     = "network_state"
+	MsgTypeAck              = "ack"
+	MsgTypeError            = "error"
+	MsgTypeLockRequest      = "lock_request"
+	MsgTypeLockGranted      = "lock_granted"
+	MsgTypeTransaction       = "transaction"
+	MsgTypeCommitNotice     = "commit_notice"
+	MsgTypeStatePushRequest = "state_push"
+	MsgTypeStatePushResponse = "state_push_response"
+	MsgTypeLockRelease      = "lock_release"
+)
 func CreateEnvelope(msgType string, senderID int, payload interface{}) (*Envelope, error) {
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -81,8 +100,6 @@ func CreateEnvelope(msgType string, senderID int, payload interface{}) (*Envelop
 		Payload:  payloadBytes,
 	}, nil
 }
-
-// ParsePayload - парсит payload из envelope в указанную структуру
 func (e *Envelope) ParsePayload(target interface{}) error {
 	return json.Unmarshal(e.Payload, target)
 }

@@ -45,20 +45,23 @@ run-controller:
 	@echo "Starting controller..."
 	go run ./cmd/controller
 
-# Запуск кошелька (требует указания конфига)
+# Запуск кошелька
 run-wallet:
-	@echo "Starting wallet with config configs/wallet-1.yaml..."
-	go run ./cmd/wallet -config configs/wallet-1.yaml
+	@echo "Starting wallet with config configs/wallet.yaml..."
+	go run ./cmd/wallet -config configs/wallet.yaml
 
-# Запуск кошелька с указанным ID
+# Запуск нескольких кошельков (каждый в отдельном терминале)
 run-wallet-1:
-	go run ./cmd/wallet -config configs/wallet-1.yaml
+	@echo "Starting wallet 1..."
+	go run ./cmd/wallet -config configs/wallet.yaml
 
 run-wallet-2:
-	go run ./cmd/wallet -config configs/wallet-2.yaml
+	@echo "Starting wallet 2..."
+	go run ./cmd/wallet -config configs/wallet.yaml
 
 run-wallet-3:
-	go run ./cmd/wallet -config configs/wallet-3.yaml
+	@echo "Starting wallet 3..."
+	go run ./cmd/wallet -config configs/wallet.yaml
 
 # Демонстрация работы системы (запуск контроллера и 3 кошельков в background)
 demo:
@@ -67,14 +70,15 @@ demo:
 	@go run ./cmd/controller &
 	@sleep 2
 	@echo "Starting wallet 1 in background..."
-	@go run ./cmd/wallet -config configs/wallet-1.yaml &
+	@go run ./cmd/wallet -config configs/wallet.yaml &
 	@sleep 1
 	@echo "Starting wallet 2 in background..."
-	@go run ./cmd/wallet -config configs/wallet-2.yaml &
+	@go run ./cmd/wallet -config configs/wallet.yaml &
 	@sleep 1
 	@echo "Starting wallet 3 in background..."
-	@go run ./cmd/wallet -config configs/wallet-3.yaml &
+	@go run ./cmd/wallet -config configs/wallet.yaml &
 	@echo "Demo started! Open web/observer.html to view the network state."
+	@echo "Each wallet will ask for a name on first startup."
 	@echo "Press Ctrl+C to stop all processes."
 
 # Остановка всех процессов

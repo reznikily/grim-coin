@@ -7,18 +7,14 @@ import (
 	"path/filepath"
 	"sync"
 )
-
-// Ledger - локальный реестр балансов кошелька
 type Ledger struct {
-	Balances map[int]int `json:"balances"` // ID -> баланс
-	Version  int         `json:"version"`  // текущая версия состояния
+	Balances map[int]int `json:"balances"`
+	Version  int         `json:"version"`
 	mutex    sync.RWMutex
 	filePath string
 }
-
-// NewLedger - создает новый ledger с указанным путем к файлу
 func NewLedger(dataPath string, walletID int) (*Ledger, error) {
-	// Создаем директорию, если её нет
+
 	if err := os.MkdirAll(filepath.Dir(dataPath), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
@@ -28,12 +24,10 @@ func NewLedger(dataPath string, walletID int) (*Ledger, error) {
 		Version:  0,
 		filePath: dataPath,
 	}
-
-	// Пытаемся загрузить существующие данные
 	if loadErr := ledger.Load(); loadErr != nil {
-		// Если файл не существует, создаем с начальными данными
+
 		if os.IsNotExist(loadErr) {
-			ledger.Balances[walletID] = 10 // начальный баланс для нового кошелька
+			ledger.Balances[walletID] = 10
 			if err := ledger.Save(); err != nil {
 				return nil, fmt.Errorf("failed to save initial ledger: %w", err)
 			}
@@ -41,8 +35,6 @@ func NewLedger(dataPath string, walletID int) (*Ledger, error) {
 			return nil, fmt.Errorf("failed to load ledger: %w", loadErr)
 		}
 	}
-
-	// Если кошелька нет в ledger, добавляем с начальным балансом
 	if _, exists := ledger.Balances[walletID]; !exists {
 		ledger.Balances[walletID] = 10
 		if err := ledger.Save(); err != nil {
@@ -52,8 +44,6 @@ func NewLedger(dataPath string, walletID int) (*Ledger, error) {
 
 	return ledger, nil
 }
-
-// GetBalance - возвращает баланс указанного кошелька
 func (l *Ledger) GetBalance(walletID int) int {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
@@ -64,15 +54,11 @@ func (l *Ledger) GetBalance(walletID int) int {
 	}
 	return balance
 }
-
-// GetVersion - возвращает текущую версию
 func (l *Ledger) GetVersion() int {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
 	return l.Version
 }
-
-// UpdateBalance - обновляет баланс кошелька
 func (l *Ledger) UpdateBalance(walletID, newBalance int) error {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
@@ -80,8 +66,6 @@ func (l *Ledger) UpdateBalance(walletID, newBalance int) error {
 	l.Balances[walletID] = newBalance
 	return l.Save()
 }
-
-// SetVersion - устанавливает версию
 func (l *Ledger) SetVersion(version int) error {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
@@ -89,13 +73,9 @@ func (l *Ledger) SetVersion(version int) error {
 	l.Version = version
 	return l.Save()
 }
-
-// GetSnapshot - возвращает снимок текущего состояния
 func (l *Ledger) GetSnapshot() (map[int]int, int) {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
-
-	// Создаем копию карты
 	snapshot := make(map[int]int)
 	for id, balance := range l.Balances {
 		snapshot[id] = balance
@@ -103,36 +83,28 @@ func (l *Ledger) GetSnapshot() (map[int]int, int) {
 
 	return snapshot, l.Version
 }
-
-// AddWallet - добавляет новый кошелек с начальным балансом
 func (l *Ledger) AddWallet(walletID int, initialBalance int) error {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
 	if _, exists := l.Balances[walletID]; exists {
-		return nil // кошелек уже существует
+		return nil
 	}
 
 	l.Balances[walletID] = initialBalance
 	return l.Save()
 }
-
-// Save - сохраняет ledger в файл (должен вызываться под мьютексом)
 func (l *Ledger) Save() error {
 	data, err := json.MarshalIndent(l, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal ledger: %w", err)
 	}
-
-	// Атомарная запись: сначала во временный файл
 	tmpFile := l.filePath + ".tmp"
 	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
 		return fmt.Errorf("failed to write temporary file: %w", err)
 	}
-
-	// Затем переименовываем
 	if err := os.Rename(tmpFile, l.filePath); err != nil {
-		// Пытаемся удалить временный файл, игнорируем ошибку удаления
+
 		_ = os.Remove(tmpFile)
 		return fmt.Errorf("failed to rename temporary file: %w", err)
 	}
@@ -140,7 +112,6 @@ func (l *Ledger) Save() error {
 	return nil
 }
 
-// Load - загружает ledger из файла
 func (l *Ledger) Load() error {
 	data, err := os.ReadFile(l.filePath)
 	if err != nil {
@@ -158,10 +129,29 @@ func (l *Ledger) Load() error {
 	l.Balances = loaded.Balances
 	l.Version = loaded.Version
 
-	// Убеждаемся, что карта инициализирована
 	if l.Balances == nil {
 		l.Balances = make(map[int]int)
 	}
 
 	return nil
+}
+
+func (l *Ledger) ApplyTransaction(from, to, amount, expectedVersion int) error {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+
+	if l.Version != expectedVersion {
+		return fmt.Errorf("version mismatch: expected %d, got %d", expectedVersion, l.Version)
+	}
+
+	fromBalance := l.Balances[from]
+	if fromBalance < amount {
+		return fmt.Errorf("insufficient balance: %d < %d", fromBalance, amount)
+	}
+
+	l.Balances[from] = fromBalance - amount
+	l.Balances[to] = l.Balances[to] + amount
+	l.Version++
+
+	return l.Save()
 }

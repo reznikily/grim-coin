@@ -1,71 +1,251 @@
 package wallet
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"grim-coin/internal/discovery"
 	"grim-coin/internal/protocol"
 	"grim-coin/internal/store"
 	"log"
+	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
-
-// Config - конфигурация кошелька
 type Config struct {
-	ID           int      `yaml:"id"`
-	Name         string   `yaml:"name"`
-	IP           string   `yaml:"ip"`
-	ListenP3     string   `yaml:"listen_p3"`
-	ControllerWS string   `yaml:"controller_ws"`
-	Peers        []string `yaml:"peers"`
+	ListenP3 string `yaml:"listen_p3,omitempty"`
+}
+type WalletProfile struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	IP   string `json:"ip"`
 }
 
-// Client - клиент кошелька
 type Client struct {
-	config     *Config
-	ledger     *store.Ledger
-	conn       *websocket.Conn
-	mutex      sync.RWMutex
-	connected  bool
-	retryCount int
-	maxRetries int
+	config          *Config
+	profile         *WalletProfile
+	ledger          *store.Ledger
+	conn            *websocket.Conn
+	mutex           sync.RWMutex
+	connected       bool
+	retryCount      int
+	maxRetries      int
+	profilePath     string
+	peerConns       map[string]*websocket.Conn
+	peerMutex       sync.RWMutex
+	activeTxID      string
+	activeTxLock    sync.Mutex
+	controllerAddr  string
+	discoveredPeers map[int]string
+	peersMutex      sync.RWMutex
 }
 
-// NewClient - создает новый клиент кошелька
-func NewClient(config *Config, dataPath string) (*Client, error) {
-	// Создаем ledger
-	ledger, err := store.NewLedger(dataPath, config.ID)
+func NewClient(config *Config, dataDir string) (*Client, error) {
+	if config.ListenP3 == "" {
+		config.ListenP3 = "0.0.0.0:9000"
+	}
+
+	client := &Client{
+		config:          config,
+		maxRetries:      3,
+		profilePath:     fmt.Sprintf("%s/profile.json", dataDir),
+		peerConns:       make(map[string]*websocket.Conn),
+		discoveredPeers: make(map[int]string),
+	}
+	profile, err := client.loadOrCreateProfile()
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup wallet profile: %w", err)
+	}
+	client.profile = profile
+	ledgerPath := fmt.Sprintf("%s/ledger-%d.json", dataDir, profile.ID)
+	ledger, err := store.NewLedger(ledgerPath, profile.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ledger: %w", err)
 	}
+	client.ledger = ledger
 
-	return &Client{
-		config:     config,
-		ledger:     ledger,
-		maxRetries: 3,
-	}, nil
+	return client, nil
 }
+func (c *Client) loadOrCreateProfile() (*WalletProfile, error) {
 
-// Start - запускает кошелек
+	if err := os.MkdirAll(filepath.Dir(c.profilePath), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create data directory: %w", err)
+	}
+	if profile, err := c.loadProfile(); err == nil {
+		log.Printf("Loaded existing profile: ID=%d, Name=%s", profile.ID, profile.Name)
+		currentIP, err := GetLocalIP()
+		if err != nil {
+			log.Printf("Warning: failed to detect current IP: %v", err)
+		} else if currentIP != profile.IP {
+			log.Printf("IP address changed from %s to %s", profile.IP, currentIP)
+			profile.IP = currentIP
+
+			if saveErr := c.saveProfile(profile); saveErr != nil {
+				log.Printf("Warning: failed to save updated profile: %v", saveErr)
+			}
+		}
+
+		return profile, nil
+	}
+	log.Println("Creating new wallet profile...")
+	return c.createNewProfile()
+}
+func (c *Client) loadProfile() (*WalletProfile, error) {
+	data, err := os.ReadFile(c.profilePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var profile WalletProfile
+	if err := json.Unmarshal(data, &profile); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal profile: %w", err)
+	}
+
+	return &profile, nil
+}
+func (c *Client) saveProfile(profile *WalletProfile) error {
+	data, err := json.MarshalIndent(profile, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal profile: %w", err)
+	}
+	tmpFile := c.profilePath + ".tmp"
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write temporary profile file: %w", err)
+	}
+
+	if err := os.Rename(tmpFile, c.profilePath); err != nil {
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("failed to rename temporary profile file: %w", err)
+	}
+
+	return nil
+}
+func (c *Client) createNewProfile() (*WalletProfile, error) {
+
+	id, err := GenerateWalletID()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate wallet ID: %w", err)
+	}
+	ip, err := GetLocalIP()
+	if err != nil {
+		return nil, fmt.Errorf("failed to detect IP address: %w", err)
+	}
+	name, err := c.promptForName()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user name: %w", err)
+	}
+
+	profile := &WalletProfile{
+		ID:   id,
+		Name: name,
+		IP:   ip,
+	}
+	if err := c.saveProfile(profile); err != nil {
+		return nil, fmt.Errorf("failed to save new profile: %w", err)
+	}
+
+	log.Printf("Created new wallet profile: ID=%d, Name=%s, IP=%s", profile.ID, profile.Name, profile.IP)
+	return profile, nil
+}
+func (c *Client) promptForName() (string, error) {
+	reader := bufio.NewReader(os.Stdin)
+
+	for {
+		fmt.Print("Добро пожаловать в GrimCoin! Введите ваше имя: ")
+		name, err := reader.ReadString('\n')
+		if err != nil {
+			return "", fmt.Errorf("failed to read input: %w", err)
+		}
+
+		name = strings.TrimSpace(name)
+		if len(name) == 0 {
+			fmt.Println("Имя не может быть пустым. Попробуйте еще раз.")
+			continue
+		}
+
+		if len(name) > 50 {
+			fmt.Println("Имя слишком длинное (максимум 50 символов). Попробуйте еще раз.")
+			continue
+		}
+		fmt.Printf("Вы ввели: %s. Правильно? (y/n): ", name)
+		confirm, _ := reader.ReadString('\n')
+		confirm = strings.TrimSpace(strings.ToLower(confirm))
+
+		if confirm == "y" || confirm == "yes" || confirm == "д" || confirm == "да" {
+			return name, nil
+		}
+	}
+}
 func (c *Client) Start(ctx context.Context) error {
-	log.Printf("Starting wallet %d (%s)", c.config.ID, c.config.Name)
+	log.Printf("Starting wallet %d (%s)", c.profile.ID, c.profile.Name)
 
-	// Запускаем подключение к контроллеру
+	disc, err := discovery.NewService()
+	if err != nil {
+		return err
+	}
+	defer disc.Close()
+
+	go disc.StartListening()
+	announcements := disc.Subscribe()
+
+	go c.handleDiscovery(ctx, announcements, disc)
+	go c.startP2PServer(ctx)
 	go c.connectToController(ctx)
+	go c.connectToPeers(ctx)
 
-	// Ожидаем завершения
 	<-ctx.Done()
 
-	log.Printf("Shutting down wallet %d", c.config.ID)
+	log.Printf("Shutting down wallet %d", c.profile.ID)
 	c.disconnect()
 
 	return nil
 }
+func (c *Client) handleDiscovery(ctx context.Context, announcements <-chan *discovery.Announcement, disc *discovery.Service) {
+	localIP, _ := GetLocalIP()
 
-// connectToController - подключается к контроллеру с повторными попытками
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ann := <-announcements:
+			if ann.Type == discovery.ServiceController {
+				addr := fmt.Sprintf("ws://%s:%d/ws", ann.IP, ann.PortP1)
+				if c.controllerAddr != addr {
+					log.Printf("Discovered controller at %s", addr)
+					c.controllerAddr = addr
+				}
+			} else if ann.Type == discovery.ServiceWallet && ann.ID != c.profile.ID {
+				peerAddr := fmt.Sprintf("ws://%s:%d/ws", ann.IP, ann.PortP3)
+				c.peersMutex.Lock()
+				if _, exists := c.discoveredPeers[ann.ID]; !exists {
+					log.Printf("Discovered wallet %d (%s) at %s", ann.ID, ann.Name, peerAddr)
+					c.discoveredPeers[ann.ID] = peerAddr
+					go c.connectToPeer(ctx, peerAddr)
+				}
+				c.peersMutex.Unlock()
+			}
+		case <-ticker.C:
+			disc.Announce(&discovery.Announcement{
+				Type:   discovery.ServiceWallet,
+				ID:     c.profile.ID,
+				Name:   c.profile.Name,
+				IP:     localIP,
+				PortP3: 9000,
+			})
+		}
+	}
+}
+
 func (c *Client) connectToController(ctx context.Context) {
 	backoffDurations := []time.Duration{200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond}
 
@@ -74,6 +254,11 @@ func (c *Client) connectToController(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
+		}
+
+		if c.controllerAddr == "" {
+			time.Sleep(1 * time.Second)
+			continue
 		}
 
 		if err := c.connect(); err != nil {
@@ -96,31 +281,25 @@ func (c *Client) connectToController(ctx context.Context) {
 			time.Sleep(backoffDurations[backoffIndex])
 			continue
 		}
-
-		// Успешное подключение
 		c.retryCount = 0
 		log.Printf("Successfully connected to controller")
-
-		// Отправляем hello
 		if err := c.sendHello(); err != nil {
 			log.Printf("Failed to send hello: %v", err)
 			c.disconnect()
 			continue
 		}
-
-		// Читаем сообщения
 		c.handleMessages(ctx)
-
-		// Если дошли сюда, значит соединение разорвано
 		log.Printf("Connection to controller lost, attempting to reconnect...")
 		c.disconnect()
 		time.Sleep(1 * time.Second)
 	}
 }
-
-// connect - устанавливает WebSocket соединение с контроллером
 func (c *Client) connect() error {
-	u, err := url.Parse(c.config.ControllerWS)
+	if c.controllerAddr == "" {
+		return fmt.Errorf("controller not discovered yet")
+	}
+
+	u, err := url.Parse(c.controllerAddr)
 	if err != nil {
 		return fmt.Errorf("invalid controller URL: %w", err)
 	}
@@ -141,33 +320,29 @@ func (c *Client) connect() error {
 
 	return nil
 }
-
-// disconnect - разрывает соединение с контроллером
 func (c *Client) disconnect() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
 	if c.conn != nil {
-		c.conn.Close()
+		_ = c.conn.Close()
 		c.conn = nil
 	}
 	c.connected = false
 }
-
-// sendHello - отправляет hello сообщение контроллеру
 func (c *Client) sendHello() error {
-	balance := c.ledger.GetBalance(c.config.ID)
+	balance := c.ledger.GetBalance(c.profile.ID)
 	version := c.ledger.GetVersion()
 
 	hello := protocol.HelloPayload{
-		ID:      c.config.ID,
-		Name:    c.config.Name,
-		IP:      c.config.IP,
+		ID:      c.profile.ID,
+		Name:    c.profile.Name,
+		IP:      c.profile.IP,
 		Balance: balance,
 		Version: version,
 	}
 
-	envelope, err := protocol.CreateEnvelope(protocol.MsgTypeHello, c.config.ID, hello)
+	envelope, err := protocol.CreateEnvelope(protocol.MsgTypeHello, c.profile.ID, hello)
 	if err != nil {
 		return fmt.Errorf("failed to create hello envelope: %w", err)
 	}
@@ -189,8 +364,6 @@ func (c *Client) sendHello() error {
 
 	return nil
 }
-
-// handleMessages - обрабатывает входящие сообщения от контроллера
 func (c *Client) handleMessages(ctx context.Context) {
 	for {
 		select {
@@ -220,13 +393,15 @@ func (c *Client) handleMessages(ctx context.Context) {
 			c.handleAckMessage(&envelope)
 		case protocol.MsgTypeError:
 			c.handleErrorMessage(&envelope)
+		case protocol.MsgTypeLockGranted:
+			c.handleLockGranted(&envelope)
+		case protocol.MsgTypeStatePushRequest:
+			c.handleStatePushRequest(&envelope)
 		default:
 			log.Printf("Unknown message type: %s", envelope.Type)
 		}
 	}
 }
-
-// handleAckMessage - обрабатывает подтверждение от контроллера
 func (c *Client) handleAckMessage(envelope *protocol.Envelope) {
 	var ack protocol.AckPayload
 	if err := envelope.ParsePayload(&ack); err != nil {
@@ -240,8 +415,6 @@ func (c *Client) handleAckMessage(envelope *protocol.Envelope) {
 		log.Printf("Received failure ack for %s: %s", ack.MessageType, ack.Message)
 	}
 }
-
-// handleErrorMessage - обрабатывает ошибку от контроллера
 func (c *Client) handleErrorMessage(envelope *protocol.Envelope) {
 	var errorPayload protocol.ErrorPayload
 	if err := envelope.ParsePayload(&errorPayload); err != nil {
@@ -252,21 +425,17 @@ func (c *Client) handleErrorMessage(envelope *protocol.Envelope) {
 	log.Printf("Received error from controller: [%d] %s - %s",
 		errorPayload.Code, errorPayload.Message, errorPayload.Details)
 }
-
-// UpdateBalance - обновляет баланс и отправляет state_update контроллеру
 func (c *Client) UpdateBalance(newBalance int) error {
-	// Обновляем локальный ledger
-	if err := c.ledger.UpdateBalance(c.config.ID, newBalance); err != nil {
+
+	if err := c.ledger.UpdateBalance(c.profile.ID, newBalance); err != nil {
 		return fmt.Errorf("failed to update local balance: %w", err)
 	}
-
-	// Отправляем обновление контроллеру
 	stateUpdate := protocol.StateUpdatePayload{
 		Balance: newBalance,
 		Version: c.ledger.GetVersion(),
 	}
 
-	envelope, err := protocol.CreateEnvelope(protocol.MsgTypeStateUpdate, c.config.ID, stateUpdate)
+	envelope, err := protocol.CreateEnvelope(protocol.MsgTypeStateUpdate, c.profile.ID, stateUpdate)
 	if err != nil {
 		return fmt.Errorf("failed to create state update envelope: %w", err)
 	}
@@ -287,20 +456,255 @@ func (c *Client) UpdateBalance(newBalance int) error {
 	log.Printf("Sent state update: balance=%d, version=%d", newBalance, c.ledger.GetVersion())
 	return nil
 }
-
-// GetBalance - возвращает текущий баланс
 func (c *Client) GetBalance() int {
-	return c.ledger.GetBalance(c.config.ID)
+	return c.ledger.GetBalance(c.profile.ID)
 }
-
-// GetVersion - возвращает текущую версию
 func (c *Client) GetVersion() int {
 	return c.ledger.GetVersion()
 }
 
-// IsConnected - проверяет, подключен ли кошелек к контроллеру
 func (c *Client) IsConnected() bool {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.connected
+}
+
+func (c *Client) startP2PServer(ctx context.Context) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", c.handleP2PConnection)
+	
+	server := &http.Server{
+		Addr:    c.config.ListenP3,
+		Handler: mux,
+	}
+
+	go func() {
+		log.Printf("Starting P2P server on %s", c.config.ListenP3)
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			log.Printf("P2P server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	server.Shutdown(context.Background())
+}
+
+func (c *Client) handleP2PConnection(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+	
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Failed to upgrade P2P connection: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	for {
+		var envelope protocol.Envelope
+		if err := conn.ReadJSON(&envelope); err != nil {
+			break
+		}
+
+		switch envelope.Type {
+		case protocol.MsgTypeTransaction:
+			c.handleIncomingTransaction(&envelope, conn)
+		}
+	}
+}
+
+func (c *Client) connectToPeers(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.peersMutex.RLock()
+			peers := make([]string, 0, len(c.discoveredPeers))
+			for _, addr := range c.discoveredPeers {
+				peers = append(peers, addr)
+			}
+			c.peersMutex.RUnlock()
+
+			c.peerMutex.RLock()
+			connectedCount := len(c.peerConns)
+			c.peerMutex.RUnlock()
+
+			if connectedCount < len(peers) {
+				for _, peerURL := range peers {
+					c.peerMutex.RLock()
+					_, exists := c.peerConns[peerURL]
+					c.peerMutex.RUnlock()
+					
+					if !exists {
+						go c.connectToPeer(ctx, peerURL)
+					}
+				}
+			}
+		}
+	}
+}
+
+func (c *Client) connectToPeer(ctx context.Context, peerURL string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		conn, _, err := websocket.DefaultDialer.Dial(peerURL, nil)
+		if err != nil {
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		c.peerMutex.Lock()
+		c.peerConns[peerURL] = conn
+		c.peerMutex.Unlock()
+
+		log.Printf("Connected to peer %s", peerURL)
+		
+		for {
+			var envelope protocol.Envelope
+			if err := conn.ReadJSON(&envelope); err != nil {
+				break
+			}
+
+			switch envelope.Type {
+			case protocol.MsgTypeTransaction:
+				c.handleIncomingTransaction(&envelope, conn)
+			}
+		}
+
+		c.peerMutex.Lock()
+		delete(c.peerConns, peerURL)
+		c.peerMutex.Unlock()
+
+		conn.Close()
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func (c *Client) handleIncomingTransaction(envelope *protocol.Envelope, conn *websocket.Conn) {
+	var tx protocol.TransactionPayload
+	if err := envelope.ParsePayload(&tx); err != nil {
+		log.Printf("Failed to parse transaction: %v", err)
+		return
+	}
+
+	if err := c.ledger.ApplyTransaction(tx.From, tx.To, tx.Amount, tx.Version-1); err != nil {
+		log.Printf("Failed to apply transaction: %v", err)
+		c.sendAckToPeer(conn, envelope.TxID, false)
+		return
+	}
+
+	log.Printf("Applied transaction %s: %d -> %d, amount=%d", envelope.TxID, tx.From, tx.To, tx.Amount)
+	c.sendAckToPeer(conn, envelope.TxID, true)
+}
+
+func (c *Client) sendAckToPeer(conn *websocket.Conn, txID string, success bool) {
+	ack := protocol.AckPayload{
+		MessageType: protocol.MsgTypeTransaction,
+		Success:     success,
+	}
+	
+	env, _ := protocol.CreateEnvelope(protocol.MsgTypeAck, c.profile.ID, ack)
+	env.TxID = txID
+	conn.WriteJSON(env)
+}
+
+func (c *Client) handleLockGranted(envelope *protocol.Envelope) {
+	var granted protocol.LockGrantedPayload
+	if err := envelope.ParsePayload(&granted); err != nil {
+		log.Printf("Failed to parse lock granted: %v", err)
+		return
+	}
+
+	log.Printf("Lock granted for tx %s", granted.TxID)
+}
+
+func (c *Client) handleStatePushRequest(envelope *protocol.Envelope) {
+	balances, version := c.ledger.GetSnapshot()
+	
+	resp := protocol.StatePushResponsePayload{
+		Balances: balances,
+		Version:  version,
+	}
+	
+	env, _ := protocol.CreateEnvelope(protocol.MsgTypeStatePushResponse, c.profile.ID, resp)
+	env.TxID = envelope.TxID
+	
+	c.mutex.RLock()
+	conn := c.conn
+	c.mutex.RUnlock()
+	
+	if conn != nil {
+		conn.WriteJSON(env)
+	}
+}
+
+func (c *Client) InitiateTransaction(to, amount int) error {
+	txID := fmt.Sprintf("tx-%d-%d", c.profile.ID, time.Now().UnixNano())
+	
+	req := protocol.LockRequestPayload{TxID: txID}
+	env, _ := protocol.CreateEnvelope(protocol.MsgTypeLockRequest, c.profile.ID, req)
+	
+	c.mutex.RLock()
+	conn := c.conn
+	c.mutex.RUnlock()
+	
+	if conn == nil {
+		return fmt.Errorf("not connected to controller")
+	}
+	
+	if err := conn.WriteJSON(env); err != nil {
+		return err
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	version := c.ledger.GetVersion()
+	tx := protocol.TransactionPayload{
+		From:    c.profile.ID,
+		To:      to,
+		Amount:  amount,
+		Version: version + 1,
+	}
+
+	txEnv, _ := protocol.CreateEnvelope(protocol.MsgTypeTransaction, c.profile.ID, tx)
+	txEnv.TxID = txID
+
+	if err := c.ledger.ApplyTransaction(tx.From, tx.To, tx.Amount, version); err != nil {
+		return err
+	}
+
+	c.peerMutex.RLock()
+	peers := make([]*websocket.Conn, 0, len(c.peerConns))
+	for _, p := range c.peerConns {
+		peers = append(peers, p)
+	}
+	c.peerMutex.RUnlock()
+
+	for _, peer := range peers {
+		if err := peer.WriteJSON(txEnv); err != nil {
+			log.Printf("Failed to send transaction to peer: %v", err)
+		}
+	}
+
+	time.Sleep(1 * time.Second)
+
+	commit := protocol.CommitNoticePayload{TxID: txID}
+	commitEnv, _ := protocol.CreateEnvelope(protocol.MsgTypeCommitNotice, c.profile.ID, commit)
+	
+	if err := conn.WriteJSON(commitEnv); err != nil {
+		return err
+	}
+
+	log.Printf("Transaction %s committed", txID)
+	return nil
 }

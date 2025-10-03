@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"grim-coin/internal/discovery"
 	"grim-coin/internal/protocol"
 	"log"
 	"net/http"
@@ -10,8 +11,6 @@ import (
 
 	"github.com/gorilla/websocket"
 )
-
-// WalletInfo - информация о кошельке в контроллере
 type WalletInfo struct {
 	ID       int             `json:"id"`
 	Name     string          `json:"name"`
@@ -23,46 +22,60 @@ type WalletInfo struct {
 	LastSeen time.Time       `json:"-"`
 }
 
-// Server - основной сервер контроллера
-type Server struct {
-	wallets   map[int]*WalletInfo // ID -> информация о кошельке
-	observers []*websocket.Conn   // соединения веб-клиентов
-	mutex     sync.RWMutex
-	upgrader  websocket.Upgrader
+type LockState struct {
+	TxID      string
+	OwnerID   int
+	ExpiresAt time.Time
 }
 
-// NewServer - создает новый сервер контроллера
+type Server struct {
+	wallets      map[int]*WalletInfo
+	observers    []*websocket.Conn
+	mutex        sync.RWMutex
+	upgrader     websocket.Upgrader
+	lockState    *LockState
+	lockMutex    sync.Mutex
+	statePushMap map[string]map[int]*protocol.StatePushResponsePayload
+}
+
 func NewServer() *Server {
 	return &Server{
-		wallets:   make(map[int]*WalletInfo),
-		observers: make([]*websocket.Conn, 0),
+		wallets:      make(map[int]*WalletInfo),
+		observers:    make([]*websocket.Conn, 0),
+		statePushMap: make(map[string]map[int]*protocol.StatePushResponsePayload),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
-				return true // разрешаем все источники для локальной разработки
+				return true
 			},
 		},
 	}
 }
+func (s *Server) Start(ctx context.Context, localIP string) error {
+	disc, err := discovery.NewService()
+	if err != nil {
+		return err
+	}
+	defer disc.Close()
 
-// Start - запускает сервер на портах P1 (8000) и P2 (8080)
-func (s *Server) Start(ctx context.Context) error {
-	// P1: сервер для кошельков
+	go disc.StartAnnouncing(&discovery.Announcement{
+		Type:   discovery.ServiceController,
+		IP:     localIP,
+		PortP1: 8000,
+		PortP2: 8080,
+	}, 3*time.Second)
+
 	walletMux := http.NewServeMux()
 	walletMux.HandleFunc("/ws", s.handleWalletConnection)
 	walletServer := &http.Server{
 		Addr:    ":8000",
 		Handler: walletMux,
 	}
-
-	// P2: сервер для наблюдателей
 	observerMux := http.NewServeMux()
 	observerMux.HandleFunc("/ws", s.handleObserverConnection)
 	observerServer := &http.Server{
 		Addr:    ":8080",
 		Handler: observerMux,
 	}
-
-	// Запускаем серверы в горутинах
 	go func() {
 		log.Printf("Starting wallet server on :8000")
 		if err := walletServer.ListenAndServe(); err != http.ErrServerClosed {
@@ -76,19 +89,13 @@ func (s *Server) Start(ctx context.Context) error {
 			log.Printf("Observer server error: %v", err)
 		}
 	}()
-
-	// Ожидаем сигнал завершения
 	<-ctx.Done()
-
-	// Graceful shutdown
 	log.Println("Shutting down servers...")
 	walletServer.Shutdown(context.Background())
 	observerServer.Shutdown(context.Background())
 
 	return nil
 }
-
-// handleWalletConnection - обрабатывает подключения кошельков (P1)
 func (s *Server) handleWalletConnection(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -113,16 +120,18 @@ func (s *Server) handleWalletConnection(w http.ResponseWriter, r *http.Request) 
 			s.handleHelloMessage(&envelope, conn)
 		case protocol.MsgTypeStateUpdate:
 			s.handleStateUpdateMessage(&envelope)
+		case protocol.MsgTypeLockRequest:
+			s.handleLockRequest(&envelope, conn)
+		case protocol.MsgTypeCommitNotice:
+			s.handleCommitNotice(&envelope)
+		case protocol.MsgTypeStatePushResponse:
+			s.handleStatePushResponse(&envelope)
 		default:
 			log.Printf("Unknown message type: %s", envelope.Type)
 		}
 	}
-
-	// Помечаем кошелек как offline при отключении
 	s.markWalletOffline(conn)
 }
-
-// handleObserverConnection - обрабатывает подключения наблюдателей (P2)
 func (s *Server) handleObserverConnection(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -132,15 +141,9 @@ func (s *Server) handleObserverConnection(w http.ResponseWriter, r *http.Request
 	defer conn.Close()
 
 	log.Printf("New observer connection from %s", conn.RemoteAddr())
-
-	// Добавляем соединение в список наблюдателей
 	s.addObserver(conn)
 	defer s.removeObserver(conn)
-
-	// Отправляем текущее состояние сразу после подключения
 	s.broadcastNetworkState()
-
-	// Держим соединение живым
 	for {
 		_, _, err := conn.ReadMessage()
 		if err != nil {
@@ -149,8 +152,6 @@ func (s *Server) handleObserverConnection(w http.ResponseWriter, r *http.Request
 		}
 	}
 }
-
-// handleHelloMessage - обрабатывает hello сообщение от кошелька
 func (s *Server) handleHelloMessage(envelope *protocol.Envelope, conn *websocket.Conn) {
 	var hello protocol.HelloPayload
 	if err := envelope.ParsePayload(&hello); err != nil {
@@ -158,8 +159,6 @@ func (s *Server) handleHelloMessage(envelope *protocol.Envelope, conn *websocket
 		s.sendError(conn, envelope.SenderID, "invalid_hello_payload", err.Error())
 		return
 	}
-
-	// Обновляем информацию о кошельке
 	s.mutex.Lock()
 	s.wallets[hello.ID] = &WalletInfo{
 		ID:       hello.ID,
@@ -175,23 +174,15 @@ func (s *Server) handleHelloMessage(envelope *protocol.Envelope, conn *websocket
 
 	log.Printf("Wallet %d (%s) connected with balance %d, version %d",
 		hello.ID, hello.Name, hello.Balance, hello.Version)
-
-	// Отправляем подтверждение
 	s.sendAck(conn, envelope.SenderID, protocol.MsgTypeHello, true, "welcome")
-
-	// Уведомляем наблюдателей об изменении состояния сети
 	s.broadcastNetworkState()
 }
-
-// handleStateUpdateMessage - обрабатывает обновление состояния от кошелька
 func (s *Server) handleStateUpdateMessage(envelope *protocol.Envelope) {
 	var stateUpdate protocol.StateUpdatePayload
 	if err := envelope.ParsePayload(&stateUpdate); err != nil {
 		log.Printf("Failed to parse state update payload: %v", err)
 		return
 	}
-
-	// Обновляем информацию о кошельке
 	s.mutex.Lock()
 	if wallet, exists := s.wallets[envelope.SenderID]; exists {
 		wallet.Balance = stateUpdate.Balance
@@ -201,19 +192,13 @@ func (s *Server) handleStateUpdateMessage(envelope *protocol.Envelope) {
 			envelope.SenderID, stateUpdate.Balance, stateUpdate.Version)
 	}
 	s.mutex.Unlock()
-
-	// Уведомляем наблюдателей
 	s.broadcastNetworkState()
 }
-
-// addObserver - добавляет наблюдателя в список
 func (s *Server) addObserver(conn *websocket.Conn) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	s.observers = append(s.observers, conn)
 }
-
-// removeObserver - удаляет наблюдателя из списка
 func (s *Server) removeObserver(conn *websocket.Conn) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -225,8 +210,6 @@ func (s *Server) removeObserver(conn *websocket.Conn) {
 		}
 	}
 }
-
-// markWalletOffline - помечает кошелек как offline
 func (s *Server) markWalletOffline(conn *websocket.Conn) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -239,16 +222,10 @@ func (s *Server) markWalletOffline(conn *websocket.Conn) {
 			break
 		}
 	}
-
-	// Уведомляем наблюдателей
 	go s.broadcastNetworkState()
 }
-
-// broadcastNetworkState - отправляет состояние сети всем наблюдателям
 func (s *Server) broadcastNetworkState() {
 	s.mutex.RLock()
-
-	// Создаем список узлов
 	nodes := make([]protocol.NodeInfo, 0, len(s.wallets))
 	for _, wallet := range s.wallets {
 		nodes = append(nodes, protocol.NodeInfo{
@@ -260,8 +237,6 @@ func (s *Server) broadcastNetworkState() {
 			Status:  wallet.Status,
 		})
 	}
-
-	// Создаем копию списка наблюдателей
 	observersCopy := make([]*websocket.Conn, len(s.observers))
 	copy(observersCopy, s.observers)
 
@@ -277,16 +252,12 @@ func (s *Server) broadcastNetworkState() {
 		log.Printf("Failed to create network state envelope: %v", err)
 		return
 	}
-
-	// Отправляем всем наблюдателям
 	for _, observer := range observersCopy {
 		if err := observer.WriteJSON(envelope); err != nil {
 			log.Printf("Failed to send network state to observer: %v", err)
 		}
 	}
 }
-
-// sendAck - отправляет подтверждение кошельку
 func (s *Server) sendAck(conn *websocket.Conn, walletID int, messageType string, success bool, message string) {
 	ack := protocol.AckPayload{
 		MessageType: messageType,
@@ -305,7 +276,6 @@ func (s *Server) sendAck(conn *websocket.Conn, walletID int, messageType string,
 	}
 }
 
-// sendError - отправляет сообщение об ошибке кошельку
 func (s *Server) sendError(conn *websocket.Conn, walletID int, code string, message string) {
 	errorPayload := protocol.ErrorPayload{
 		Code:    400,
@@ -322,4 +292,141 @@ func (s *Server) sendError(conn *websocket.Conn, walletID int, code string, mess
 	if err := conn.WriteJSON(envelope); err != nil {
 		log.Printf("Failed to send error to wallet %d: %v", walletID, err)
 	}
+}
+
+func (s *Server) handleLockRequest(envelope *protocol.Envelope, conn *websocket.Conn) {
+	var req protocol.LockRequestPayload
+	if err := envelope.ParsePayload(&req); err != nil {
+		log.Printf("Failed to parse lock request: %v", err)
+		return
+	}
+
+	s.lockMutex.Lock()
+	defer s.lockMutex.Unlock()
+
+	if s.lockState != nil && time.Now().Before(s.lockState.ExpiresAt) {
+		s.sendError(conn, envelope.SenderID, "lock_busy", "Another transaction is in progress")
+		return
+	}
+
+	ttl := 30000
+	s.lockState = &LockState{
+		TxID:      req.TxID,
+		OwnerID:   envelope.SenderID,
+		ExpiresAt: time.Now().Add(time.Duration(ttl) * time.Millisecond),
+	}
+
+	payload := protocol.LockGrantedPayload{
+		TxID:  req.TxID,
+		TTLMs: ttl,
+	}
+
+	resp, err := protocol.CreateEnvelope(protocol.MsgTypeLockGranted, 0, payload)
+	if err != nil {
+		log.Printf("Failed to create lock granted envelope: %v", err)
+		return
+	}
+
+	if err := conn.WriteJSON(resp); err != nil {
+		log.Printf("Failed to send lock granted: %v", err)
+	}
+
+	log.Printf("Lock granted to wallet %d for tx %s", envelope.SenderID, req.TxID)
+}
+
+func (s *Server) handleCommitNotice(envelope *protocol.Envelope) {
+	var commit protocol.CommitNoticePayload
+	if err := envelope.ParsePayload(&commit); err != nil {
+		log.Printf("Failed to parse commit notice: %v", err)
+		return
+	}
+
+	s.lockMutex.Lock()
+	s.lockState = nil
+	s.statePushMap[commit.TxID] = make(map[int]*protocol.StatePushResponsePayload)
+	s.lockMutex.Unlock()
+
+	log.Printf("Transaction %s committed, collecting states", commit.TxID)
+
+	s.mutex.RLock()
+	wallets := make([]*WalletInfo, 0, len(s.wallets))
+	for _, w := range s.wallets {
+		if w.Status == "online" && w.Conn != nil {
+			wallets = append(wallets, w)
+		}
+	}
+	s.mutex.RUnlock()
+
+	req := protocol.StatePushRequestPayload{TxID: commit.TxID}
+	for _, w := range wallets {
+		env, _ := protocol.CreateEnvelope(protocol.MsgTypeStatePushRequest, 0, req)
+		if err := w.Conn.WriteJSON(env); err != nil {
+			log.Printf("Failed to send state push request to wallet %d: %v", w.ID, err)
+		}
+	}
+
+	go s.waitAndVerifyStates(commit.TxID, len(wallets))
+}
+
+func (s *Server) handleStatePushResponse(envelope *protocol.Envelope) {
+	var resp protocol.StatePushResponsePayload
+	if err := envelope.ParsePayload(&resp); err != nil {
+		log.Printf("Failed to parse state push response: %v", err)
+		return
+	}
+
+	s.lockMutex.Lock()
+	if states, ok := s.statePushMap[envelope.TxID]; ok {
+		states[envelope.SenderID] = &resp
+	}
+	s.lockMutex.Unlock()
+}
+
+func (s *Server) waitAndVerifyStates(txID string, expectedCount int) {
+	time.Sleep(2 * time.Second)
+
+	s.lockMutex.Lock()
+	states := s.statePushMap[txID]
+	delete(s.statePushMap, txID)
+	s.lockMutex.Unlock()
+
+	if len(states) == 0 {
+		return
+	}
+
+	var firstVersion int
+	totalSum := 0
+	consistent := true
+
+	for _, state := range states {
+		if firstVersion == 0 {
+			firstVersion = state.Version
+		}
+		if state.Version != firstVersion {
+			consistent = false
+		}
+		for _, bal := range state.Balances {
+			totalSum += bal
+		}
+	}
+
+	if !consistent {
+		log.Printf("Warning: version mismatch detected for tx %s", txID)
+	}
+
+	log.Printf("State verification for tx %s: collected %d/%d states, sum=%d, version=%d",
+		txID, len(states), expectedCount, totalSum, firstVersion)
+
+	s.mutex.Lock()
+	for id, state := range states {
+		if wallet, ok := s.wallets[id]; ok {
+			if bal, exists := state.Balances[id]; exists {
+				wallet.Balance = bal
+			}
+			wallet.Version = state.Version
+		}
+	}
+	s.mutex.Unlock()
+
+	s.broadcastNetworkState()
 }
