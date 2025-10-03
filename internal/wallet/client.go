@@ -186,7 +186,8 @@ func (c *Client) promptForName() (string, error) {
 func (c *Client) Start(ctx context.Context) error {
 	log.Printf("Starting wallet %d (%s)", c.profile.ID, c.profile.Name)
 
-	disc, err := discovery.NewService()
+	// Use the IP from profile (which was already determined during loadOrCreateProfile)
+	disc, err := discovery.NewServiceWithIP(c.profile.IP)
 	if err != nil {
 		return err
 	}
@@ -208,7 +209,7 @@ func (c *Client) Start(ctx context.Context) error {
 	return nil
 }
 func (c *Client) handleDiscovery(ctx context.Context, announcements <-chan *discovery.Announcement, disc *discovery.Service) {
-	localIP, _ := GetLocalIP()
+	localIP := c.profile.IP
 
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()

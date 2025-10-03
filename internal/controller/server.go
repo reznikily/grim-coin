@@ -51,7 +51,7 @@ func NewServer() *Server {
 	}
 }
 func (s *Server) Start(ctx context.Context, localIP string) error {
-	disc, err := discovery.NewService()
+	disc, err := discovery.NewServiceWithIP(localIP)
 	if err != nil {
 		return err
 	}

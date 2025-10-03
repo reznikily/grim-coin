@@ -40,6 +40,10 @@ type Service struct {
 }
 
 func NewService() (*Service, error) {
+	return NewServiceWithIP("")
+}
+
+func NewServiceWithIP(preferredIP string) (*Service, error) {
 	addr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf(":%d", BroadcastPort))
 	if err != nil {
 		return nil, err
@@ -52,10 +56,29 @@ func NewService() (*Service, error) {
 
 	setBroadcastOption(conn)
 
-	localIP, broadcastAddr, err := getLocalIPAndBroadcast()
-	if err != nil {
-		conn.Close()
-		return nil, err
+	var localIP, broadcastAddr string
+	if preferredIP != "" {
+		// Use provided IP
+		localIP = preferredIP
+		var err error
+		broadcastAddr, err = getBroadcastAddrForIP(preferredIP)
+		if err != nil {
+			log.Printf("Warning: failed to get broadcast address for %s: %v", preferredIP, err)
+			// Fallback to auto-detection
+			localIP, broadcastAddr, err = getLocalIPAndBroadcast()
+			if err != nil {
+				conn.Close()
+				return nil, err
+			}
+		}
+	} else {
+		// Auto-detect
+		var err error
+		localIP, broadcastAddr, err = getLocalIPAndBroadcast()
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
 	}
 
 	log.Printf("Discovery service: local IP %s, broadcast %s", localIP, broadcastAddr)
@@ -213,4 +236,45 @@ func isPrivateIP(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+func getBroadcastAddrForIP(ipStr string) (string, error) {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return "", fmt.Errorf("invalid IP address: %s", ipStr)
+	}
+
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+
+	for _, iface := range interfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+
+			if ipNet.IP.Equal(ip) {
+				// Found the interface with this IP
+				broadcast := make(net.IP, 4)
+				ip4 := ipNet.IP.To4()
+				if ip4 == nil {
+					continue
+				}
+				for i := range ip4 {
+					broadcast[i] = ip4[i] | ^ipNet.Mask[i]
+				}
+				return fmt.Sprintf("%s:%d", broadcast.String(), BroadcastPort), nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no network interface found for IP %s", ipStr)
 }
