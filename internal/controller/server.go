@@ -465,9 +465,9 @@ func (s *Server) handleObserverHTML(w http.ResponseWriter, r *http.Request) {
 
             connect() {
                 try {
-                    // Use the server's host and port for WebSocket connection
-                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                    const wsUrl = protocol + '//' + window.location.host + '/ws';
+                    // Connect to the controller's public IP
+                    const wsUrl = 'ws://` + s.publicIP + `:8080/ws';
+                    console.log('Connecting to:', wsUrl);
                     this.socket = new WebSocket(wsUrl);
                     
                     this.socket.onopen = (event) => {
