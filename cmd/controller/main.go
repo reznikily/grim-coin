@@ -14,9 +14,18 @@ import (
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	localIP, err := getLocalIP()
-	if err != nil {
-		log.Fatalf("Failed to get local IP: %v", err)
+	// Print all available network interfaces
+	printNetworkInterfaces()
+
+	localIP := os.Getenv("GRIM_IP")
+	if localIP == "" {
+		var err error
+		localIP, err = getLocalIP()
+		if err != nil {
+			log.Fatalf("Failed to get local IP: %v", err)
+		}
+	} else {
+		log.Printf("Using IP from GRIM_IP environment variable: %s", localIP)
 	}
 
 	log.Println("=== GrimCoin Controller ===")
@@ -51,6 +60,8 @@ func getLocalIP() (string, error) {
 		return "", err
 	}
 
+	var candidateIPs []net.IP
+
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
 			continue
@@ -71,12 +82,24 @@ func getLocalIP() (string, error) {
 			}
 
 			if ip != nil && ip.To4() != nil && !ip.IsLoopback() && isPrivateIP(ip) {
-				return ip.String(), nil
+				candidateIPs = append(candidateIPs, ip)
 			}
 		}
 	}
 
-	return "", fmt.Errorf("no suitable IP found")
+	if len(candidateIPs) == 0 {
+		return "", fmt.Errorf("no suitable IP found")
+	}
+
+	// Prefer 192.168.x.x and 10.x.x.x over 172.x.x.x (often virtual adapters)
+	for _, ip := range candidateIPs {
+		if ip[0] == 192 || ip[0] == 10 {
+			return ip.String(), nil
+		}
+	}
+
+	// Return first candidate if no preferred IP found
+	return candidateIPs[0].String(), nil
 }
 
 func isPrivateIP(ip net.IP) bool {
@@ -93,4 +116,44 @@ func isPrivateIP(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+func printNetworkInterfaces() {
+	log.Println("Available network interfaces:")
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		log.Printf("Failed to get interfaces: %v", err)
+		return
+	}
+
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+				private := ""
+				if isPrivateIP(ip) {
+					private = " (private)"
+				}
+				log.Printf("  - %s: %s%s", iface.Name, ip.String(), private)
+			}
+		}
+	}
+	log.Println("To use specific IP, set GRIM_IP environment variable")
+	log.Println("")
 }

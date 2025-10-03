@@ -3,18 +3,27 @@ package wallet
 import (
 	"crypto/rand"
 	"fmt"
+	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 )
 func GetLocalIP() (string, error) {
+	// Check if IP is specified via environment variable
+	if envIP := os.Getenv("GRIM_IP"); envIP != "" {
+		log.Printf("Using IP from GRIM_IP environment variable: %s", envIP)
+		return envIP, nil
+	}
 
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return "", fmt.Errorf("failed to get network interfaces: %w", err)
 	}
-	for _, iface := range interfaces {
 
+	var candidateIPs []net.IP
+
+	for _, iface := range interfaces {
 		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
 			continue
 		}
@@ -32,37 +41,26 @@ func GetLocalIP() (string, error) {
 			case *net.IPAddr:
 				ip = v.IP
 			}
-			if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
 
-				if isPrivateIP(ip) {
-					return ip.String(), nil
-				}
-			}
-		}
-	}
-	interfaces, _ = net.Interfaces()
-	for _, iface := range interfaces {
-		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
-			continue
-		}
-
-		addrs, _ := iface.Addrs()
-		for _, addr := range addrs {
-			var ip net.IP
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-
-			if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
-				return ip.String(), nil
+			if ip != nil && ip.To4() != nil && !ip.IsLoopback() && isPrivateIP(ip) {
+				candidateIPs = append(candidateIPs, ip)
 			}
 		}
 	}
 
-	return "", fmt.Errorf("no suitable network interface found")
+	if len(candidateIPs) == 0 {
+		return "", fmt.Errorf("no suitable network interface found")
+	}
+
+	// Prefer 192.168.x.x and 10.x.x.x over 172.x.x.x (often virtual adapters)
+	for _, ip := range candidateIPs {
+		if ip[0] == 192 || ip[0] == 10 {
+			return ip.String(), nil
+		}
+	}
+
+	// Return first candidate if no preferred IP found
+	return candidateIPs[0].String(), nil
 }
 func isPrivateIP(ip net.IP) bool {
 	private := []string{

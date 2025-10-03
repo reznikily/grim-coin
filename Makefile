@@ -45,10 +45,20 @@ run-controller:
 	@echo "Starting controller..."
 	go run ./cmd/controller
 
+# Запуск контроллера с указанным IP (использование: make run-controller-ip GRIM_IP=192.168.1.100)
+run-controller-ip:
+	@echo "Starting controller with IP $(GRIM_IP)..."
+	GRIM_IP=$(GRIM_IP) go run ./cmd/controller
+
 # Запуск кошелька
 run-wallet:
 	@echo "Starting wallet with config configs/wallet.yaml..."
 	go run ./cmd/wallet -config configs/wallet.yaml
+
+# Запуск кошелька с указанным IP (использование: make run-wallet-ip GRIM_IP=192.168.1.100)
+run-wallet-ip:
+	@echo "Starting wallet with IP $(GRIM_IP)..."
+	GRIM_IP=$(GRIM_IP) go run ./cmd/wallet -config configs/wallet.yaml
 
 # Запуск нескольких кошельков (каждый в отдельном терминале)
 run-wallet-1:
@@ -139,10 +149,12 @@ help:
 	@echo "  make build-darwin-arm64 - Build for macOS ARM64"
 	@echo ""
 	@echo "Running:"
-	@echo "  make run-controller     - Run controller"
-	@echo "  make run-wallet         - Run wallet with default config"
-	@echo "  make run-wallet-N       - Run specific wallet (N=1,2,3)"
-	@echo "  make demo               - Start full demo with controller + 3 wallets"
+	@echo "  make run-controller         - Run controller"
+	@echo "  make run-controller-ip GRIM_IP=X - Run controller with specific IP"
+	@echo "  make run-wallet             - Run wallet with default config"
+	@echo "  make run-wallet-ip GRIM_IP=X    - Run wallet with specific IP"
+	@echo "  make run-wallet-N           - Run specific wallet (N=1,2,3)"
+	@echo "  make demo                   - Start full demo with controller + 3 wallets"
 	@echo ""
 	@echo "Development:"
 	@echo "  make deps               - Install dependencies"

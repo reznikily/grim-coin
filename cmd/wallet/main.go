@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"grim-coin/internal/wallet"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -29,6 +30,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
+
+	// Print available network interfaces
+	printNetworkInterfaces()
 
 	log.Printf("=== GrimCoin Wallet ===")
 	log.Printf("P2P Port: %s", config.ListenP3)
@@ -147,4 +151,60 @@ func handleCommands(ctx context.Context, client *wallet.Client) {
 			fmt.Println("Unknown command")
 		}
 	}
+}
+
+func printNetworkInterfaces() {
+	log.Println("Available network interfaces:")
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		log.Printf("Failed to get interfaces: %v", err)
+		return
+	}
+
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+
+			if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+				private := ""
+				if isPrivateIP(ip) {
+					private = " (private)"
+				}
+				log.Printf("  - %s: %s%s", iface.Name, ip.String(), private)
+			}
+		}
+	}
+	log.Println("To use specific IP, set GRIM_IP environment variable")
+	log.Println("")
+}
+
+func isPrivateIP(ip net.IP) bool {
+	private := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+	}
+
+	for _, block := range private {
+		_, subnet, _ := net.ParseCIDR(block)
+		if subnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
