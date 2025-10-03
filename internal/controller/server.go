@@ -2,10 +2,14 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"grim-coin/internal/discovery"
 	"grim-coin/internal/protocol"
+	"io"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +40,7 @@ type Server struct {
 	lockState    *LockState
 	lockMutex    sync.Mutex
 	statePushMap map[string]map[int]*protocol.StatePushResponsePayload
+	publicIP     string
 }
 
 func NewServer() *Server {
@@ -50,7 +55,49 @@ func NewServer() *Server {
 		},
 	}
 }
+
+// getPublicIP tries to determine the public IP address
+func getPublicIP() (string, error) {
+	// Try multiple services in case one is down
+	services := []string{
+		"https://api.ipify.org",
+		"https://icanhazip.com",
+		"https://ifconfig.me/ip",
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	for _, service := range services {
+		resp, err := client.Get(service)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			continue
+		}
+
+		ip := strings.TrimSpace(string(body))
+		// Validate it's a valid IP
+		if net.ParseIP(ip) != nil {
+			return ip, nil
+		}
+	}
+
+	return "", fmt.Errorf("failed to get public IP from any service")
+}
 func (s *Server) Start(ctx context.Context, localIP string) error {
+	// Get public IP address
+	publicIP, err := getPublicIP()
+	if err != nil {
+		log.Printf("Warning: failed to get public IP, using local IP instead: %v", err)
+		publicIP = localIP
+	}
+	s.publicIP = publicIP
+	log.Printf("Public IP address: %s", publicIP)
+
 	disc, err := discovery.NewServiceWithIP(localIP)
 	if err != nil {
 		return err
@@ -67,24 +114,26 @@ func (s *Server) Start(ctx context.Context, localIP string) error {
 	walletMux := http.NewServeMux()
 	walletMux.HandleFunc("/ws", s.handleWalletConnection)
 	walletServer := &http.Server{
-		Addr:    ":8000",
+		Addr:    "0.0.0.0:8000",
 		Handler: walletMux,
 	}
 	observerMux := http.NewServeMux()
 	observerMux.HandleFunc("/ws", s.handleObserverConnection)
+	observerMux.HandleFunc("/", s.handleObserverHTML)
 	observerServer := &http.Server{
-		Addr:    ":8080",
+		Addr:    "0.0.0.0:8080",
 		Handler: observerMux,
 	}
 	go func() {
-		log.Printf("Starting wallet server on :8000")
+		log.Printf("Starting wallet server on 0.0.0.0:8000")
 		if err := walletServer.ListenAndServe(); err != http.ErrServerClosed {
 			log.Printf("Wallet server error: %v", err)
 		}
 	}()
 
 	go func() {
-		log.Printf("Starting observer server on :8080")
+		log.Printf("Starting observer server on 0.0.0.0:8080")
+		log.Printf("Observer UI available at: http://%s:8080", publicIP)
 		if err := observerServer.ListenAndServe(); err != http.ErrServerClosed {
 			log.Printf("Observer server error: %v", err)
 		}
@@ -151,6 +200,413 @@ func (s *Server) handleObserverConnection(w http.ResponseWriter, r *http.Request
 			break
 		}
 	}
+}
+
+func (s *Server) handleObserverHTML(w http.ResponseWriter, r *http.Request) {
+	// Read the observer.html file
+	html := `<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GrimCoin - Наблюдатель сети</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            line-height: 1.6;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            margin: 0 0 10px 0;
+            font-size: 2.5em;
+        }
+
+        .status {
+            padding: 10px 20px;
+            border-radius: 25px;
+            font-weight: bold;
+            display: inline-block;
+            margin-bottom: 20px;
+        }
+
+        .status.connected {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .status.disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .status.connecting {
+            background-color: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .card-header {
+            background-color: #f8f9fa;
+            padding: 15px 20px;
+            border-bottom: 1px solid #e9ecef;
+            font-weight: bold;
+            font-size: 1.2em;
+        }
+
+        .card-body {
+            padding: 20px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        th {
+            background-color: #f8f9fa;
+            font-weight: 600;
+            color: #495057;
+        }
+
+        tr:hover {
+            background-color: #f8f9fa;
+        }
+
+        .status-online {
+            color: #28a745;
+            font-weight: bold;
+        }
+
+        .status-offline {
+            color: #dc3545;
+            font-weight: bold;
+        }
+
+        .balance {
+            font-weight: bold;
+            color: #007bff;
+        }
+
+        .timestamp {
+            color: #6c757d;
+            font-size: 0.9em;
+            margin-top: 10px;
+        }
+
+        .no-data {
+            text-align: center;
+            color: #6c757d;
+            font-style: italic;
+            padding: 40px;
+        }
+
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .metric {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        .metric-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #007bff;
+            margin-bottom: 5px;
+        }
+
+        .metric-label {
+            color: #6c757d;
+            font-size: 0.9em;
+        }
+
+        .error-message {
+            background-color: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            border-left: 4px solid #dc3545;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        .connecting .status {
+            animation: pulse 2s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🪙 GrimCoin</h1>
+            <p>Наблюдатель децентрализованной платёжной сети</p>
+            <div id="connection-status" class="status connecting">🔄 Подключение к контроллеру...</div>
+        </div>
+
+        <div id="error-container"></div>
+
+        <div class="metrics">
+            <div class="metric">
+                <div id="total-nodes" class="metric-value">0</div>
+                <div class="metric-label">Всего узлов</div>
+            </div>
+            <div class="metric">
+                <div id="online-nodes" class="metric-value">0</div>
+                <div class="metric-label">Онлайн</div>
+            </div>
+            <div class="metric">
+                <div id="total-balance" class="metric-value">0</div>
+                <div class="metric-label">Общий баланс</div>
+            </div>
+            <div class="metric">
+                <div id="network-version" class="metric-value">0</div>
+                <div class="metric-label">Версия сети</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                📊 Состояние узлов сети
+            </div>
+            <div class="card-body">
+                <table id="nodes-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Имя</th>
+                            <th>IP адрес</th>
+                            <th>Баланс</th>
+                            <th>Версия</th>
+                            <th>Статус</th>
+                        </tr>
+                    </thead>
+                    <tbody id="nodes-tbody">
+                        <tr>
+                            <td colspan="6" class="no-data">Ожидание данных от контроллера...</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div id="last-update" class="timestamp"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class GrimCoinObserver {
+            constructor() {
+                this.socket = null;
+                this.reconnectAttempts = 0;
+                this.maxReconnectAttempts = 5;
+                this.reconnectInterval = 3000;
+                this.nodes = [];
+                
+                this.initElements();
+                this.connect();
+            }
+
+            initElements() {
+                this.statusElement = document.getElementById('connection-status');
+                this.errorContainer = document.getElementById('error-container');
+                this.nodesTableBody = document.getElementById('nodes-tbody');
+                this.lastUpdateElement = document.getElementById('last-update');
+                
+                this.totalNodesElement = document.getElementById('total-nodes');
+                this.onlineNodesElement = document.getElementById('online-nodes');
+                this.totalBalanceElement = document.getElementById('total-balance');
+                this.networkVersionElement = document.getElementById('network-version');
+            }
+
+            connect() {
+                try {
+                    // Use the server's host and port for WebSocket connection
+                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    const wsUrl = protocol + '//' + window.location.host + '/ws';
+                    this.socket = new WebSocket(wsUrl);
+                    
+                    this.socket.onopen = (event) => {
+                        console.log('Connected to controller');
+                        this.setStatus('connected', '✅ Подключен к контроллеру');
+                        this.reconnectAttempts = 0;
+                        this.clearError();
+                    };
+                    
+                    this.socket.onmessage = (event) => {
+                        try {
+                            const envelope = JSON.parse(event.data);
+                            this.handleMessage(envelope);
+                        } catch (error) {
+                            console.error('Failed to parse message:', error);
+                            this.showError('Ошибка парсинга сообщения: ' + error.message);
+                        }
+                    };
+                    
+                    this.socket.onclose = (event) => {
+                        console.log('Connection closed:', event);
+                        this.setStatus('disconnected', '❌ Соединение разорвано');
+                        this.scheduleReconnect();
+                    };
+                    
+                    this.socket.onerror = (error) => {
+                        console.error('WebSocket error:', error);
+                        this.showError('Ошибка WebSocket соединения');
+                    };
+                    
+                } catch (error) {
+                    console.error('Failed to connect:', error);
+                    this.setStatus('disconnected', '❌ Ошибка подключения');
+                    this.scheduleReconnect();
+                }
+            }
+
+            scheduleReconnect() {
+                if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                    this.reconnectAttempts++;
+                    this.setStatus('connecting', ` + "`🔄 Переподключение... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`" + `);
+                    
+                    setTimeout(() => {
+                        this.connect();
+                    }, this.reconnectInterval);
+                } else {
+                    this.setStatus('disconnected', '❌ Не удалось подключиться к контроллеру');
+                    this.showError('Превышено максимальное количество попыток переподключения. Обновите страницу для повтора.');
+                }
+            }
+
+            handleMessage(envelope) {
+                console.log('Received message:', envelope);
+                
+                if (envelope.type === 'network_state') {
+                    this.updateNetworkState(envelope.payload);
+                }
+            }
+
+            updateNetworkState(payload) {
+                this.nodes = payload.nodes || [];
+                this.renderNodesTable();
+                this.updateMetrics();
+                
+                const timestamp = new Date(payload.timestamp);
+                this.lastUpdateElement.textContent = ` + "`Последнее обновление: ${timestamp.toLocaleString('ru-RU')}`" + `;
+            }
+
+            renderNodesTable() {
+                if (this.nodes.length === 0) {
+                    this.nodesTableBody.innerHTML = ` + "`" + `
+                        <tr>
+                            <td colspan="6" class="no-data">Нет подключенных узлов</td>
+                        </tr>
+                    ` + "`" + `;
+                    return;
+                }
+
+                // Сортируем узлы по ID
+                const sortedNodes = [...this.nodes].sort((a, b) => a.id - b.id);
+
+                this.nodesTableBody.innerHTML = sortedNodes.map(node => ` + "`" + `
+                    <tr>
+                        <td>${node.id}</td>
+                        <td>${this.escapeHtml(node.name)}</td>
+                        <td>${this.escapeHtml(node.ip)}</td>
+                        <td class="balance">${node.balance} 🪙</td>
+                        <td>${node.version}</td>
+                        <td class="status-${node.status}">${node.status === 'online' ? 'Онлайн' : 'Офлайн'}</td>
+                    </tr>
+                ` + "`" + `).join('');
+            }
+
+            updateMetrics() {
+                const totalNodes = this.nodes.length;
+                const onlineNodes = this.nodes.filter(node => node.status === 'online').length;
+                const totalBalance = this.nodes.reduce((sum, node) => sum + node.balance, 0);
+                const maxVersion = Math.max(...this.nodes.map(node => node.version), 0);
+
+                this.totalNodesElement.textContent = totalNodes;
+                this.onlineNodesElement.textContent = onlineNodes;
+                this.totalBalanceElement.textContent = totalBalance;
+                this.networkVersionElement.textContent = maxVersion;
+            }
+
+            setStatus(type, message) {
+                this.statusElement.className = ` + "`status ${type}`" + `;
+                this.statusElement.textContent = message;
+            }
+
+            showError(message) {
+                this.errorContainer.innerHTML = ` + "`" + `
+                    <div class="error-message">
+                        <strong>Ошибка:</strong> ${this.escapeHtml(message)}
+                    </div>
+                ` + "`" + `;
+            }
+
+            clearError() {
+                this.errorContainer.innerHTML = '';
+            }
+
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+        }
+
+        // Запускаем наблюдатель при загрузке страницы
+        document.addEventListener('DOMContentLoaded', () => {
+            new GrimCoinObserver();
+        });
+    </script>
+</body>
+</html>`
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(html))
 }
 func (s *Server) handleHelloMessage(envelope *protocol.Envelope, conn *websocket.Conn) {
 	var hello protocol.HelloPayload
