@@ -79,14 +79,10 @@ func (c *Client) loadOrCreateProfile() (*WalletProfile, error) {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 	if profile, err := c.loadProfile(); err == nil {
-		log.Printf("Loaded existing profile: ID=%d, Name=%s", profile.ID, profile.Name)
+		log.Printf("Loaded profile: %s (ID=%d)", profile.Name, profile.ID)
 		currentIP, err := GetLocalIP()
-		if err != nil {
-			log.Printf("Warning: failed to detect current IP: %v", err)
-		} else if currentIP != profile.IP {
-			log.Printf("IP address changed from %s to %s", profile.IP, currentIP)
+		if err == nil && currentIP != profile.IP {
 			profile.IP = currentIP
-
 			if saveErr := c.saveProfile(profile); saveErr != nil {
 				log.Printf("Warning: failed to save updated profile: %v", saveErr)
 			}
@@ -151,7 +147,7 @@ func (c *Client) createNewProfile() (*WalletProfile, error) {
 		return nil, fmt.Errorf("failed to save new profile: %w", err)
 	}
 
-	log.Printf("Created new wallet profile: ID=%d, Name=%s, IP=%s", profile.ID, profile.Name, profile.IP)
+	log.Printf("Created profile: %s (ID=%d)", profile.Name, profile.ID)
 	return profile, nil
 }
 func (c *Client) promptForName() (string, error) {
@@ -184,7 +180,7 @@ func (c *Client) promptForName() (string, error) {
 	}
 }
 func (c *Client) Start(ctx context.Context) error {
-	log.Printf("Starting wallet %d (%s)", c.profile.ID, c.profile.Name)
+	// Starting wallet
 
 	// Use the IP from profile (which was already determined during loadOrCreateProfile)
 	disc, err := discovery.NewServiceWithIP(c.profile.IP)
@@ -203,7 +199,7 @@ func (c *Client) Start(ctx context.Context) error {
 
 	<-ctx.Done()
 
-	log.Printf("Shutting down wallet %d", c.profile.ID)
+	// Shutting down wallet
 	c.disconnect()
 
 	return nil
@@ -222,14 +218,14 @@ func (c *Client) handleDiscovery(ctx context.Context, announcements <-chan *disc
 			if ann.Type == discovery.ServiceController {
 				addr := fmt.Sprintf("ws://%s:%d/ws", ann.IP, ann.PortP1)
 				if c.controllerAddr != addr {
-					log.Printf("Discovered controller at %s", addr)
+					// Discovered controller - no log to avoid spam
 					c.controllerAddr = addr
 				}
 			} else if ann.Type == discovery.ServiceWallet && ann.ID != c.profile.ID {
 				peerAddr := fmt.Sprintf("ws://%s:%d/ws", ann.IP, ann.PortP3)
 				c.peersMutex.Lock()
 				if _, exists := c.discoveredPeers[ann.ID]; !exists {
-					log.Printf("Discovered wallet %d (%s) at %s", ann.ID, ann.Name, peerAddr)
+					// Discovered new peer - no log to avoid spam
 					c.discoveredPeers[ann.ID] = peerAddr
 					go c.connectToPeer(ctx, peerAddr)
 				}
@@ -264,8 +260,11 @@ func (c *Client) connectToController(ctx context.Context) {
 
 		if err := c.connect(); err != nil {
 			c.retryCount++
-			log.Printf("Failed to connect to controller (attempt %d/%d): %v",
-				c.retryCount, c.maxRetries, err)
+			// Reduce log spam - only log every few attempts
+			if c.retryCount == 1 || c.retryCount >= c.maxRetries {
+				log.Printf("Failed to connect to controller (attempt %d/%d): %v",
+					c.retryCount, c.maxRetries, err)
+			}
 
 			if c.retryCount >= c.maxRetries {
 				log.Printf("Max retries exceeded, waiting before retry cycle...")
@@ -283,14 +282,14 @@ func (c *Client) connectToController(ctx context.Context) {
 			continue
 		}
 		c.retryCount = 0
-		log.Printf("Successfully connected to controller")
+		// Connected to controller
 		if err := c.sendHello(); err != nil {
 			log.Printf("Failed to send hello: %v", err)
 			c.disconnect()
 			continue
 		}
 		c.handleMessages(ctx)
-		log.Printf("Connection to controller lost, attempting to reconnect...")
+		// Connection lost, reconnecting...
 		c.disconnect()
 		time.Sleep(1 * time.Second)
 	}
@@ -360,8 +359,7 @@ func (c *Client) sendHello() error {
 		return fmt.Errorf("failed to send hello: %w", err)
 	}
 
-	log.Printf("Sent hello: ID=%d, Name=%s, Balance=%d, Version=%d",
-		hello.ID, hello.Name, hello.Balance, hello.Version)
+	// Hello sent
 
 	return nil
 }
@@ -387,7 +385,7 @@ func (c *Client) handleMessages(ctx context.Context) {
 			break
 		}
 
-		log.Printf("Received message type: %s", envelope.Type)
+		// Received message (logging disabled to avoid spam)
 
 		switch envelope.Type {
 		case protocol.MsgTypeAck:
@@ -410,11 +408,8 @@ func (c *Client) handleAckMessage(envelope *protocol.Envelope) {
 		return
 	}
 
-	if ack.Success {
-		log.Printf("Received successful ack for %s: %s", ack.MessageType, ack.Message)
-	} else {
-		log.Printf("Received failure ack for %s: %s", ack.MessageType, ack.Message)
-	}
+	// Ack received (logging disabled to avoid spam)
+	_ = ack
 }
 func (c *Client) handleErrorMessage(envelope *protocol.Envelope) {
 	var errorPayload protocol.ErrorPayload
@@ -454,7 +449,7 @@ func (c *Client) UpdateBalance(newBalance int) error {
 		return fmt.Errorf("failed to send state update: %w", err)
 	}
 
-	log.Printf("Sent state update: balance=%d, version=%d", newBalance, c.ledger.GetVersion())
+	// State update sent (no log to avoid spam)
 	return nil
 }
 func (c *Client) GetBalance() int {
@@ -480,7 +475,7 @@ func (c *Client) startP2PServer(ctx context.Context) {
 	}
 
 	go func() {
-		log.Printf("Starting P2P server on %s", c.config.ListenP3)
+		// P2P server starting
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
 			log.Printf("P2P server error: %v", err)
 		}
@@ -568,7 +563,7 @@ func (c *Client) connectToPeer(ctx context.Context, peerURL string) {
 		c.peerConns[peerURL] = conn
 		c.peerMutex.Unlock()
 
-		log.Printf("Connected to peer %s", peerURL)
+		// Connected to peer
 		
 		for {
 			var envelope protocol.Envelope
@@ -604,7 +599,7 @@ func (c *Client) handleIncomingTransaction(envelope *protocol.Envelope, conn *we
 		return
 	}
 
-	log.Printf("Applied transaction %s: %d -> %d, amount=%d", envelope.TxID, tx.From, tx.To, tx.Amount)
+	log.Printf("✓ Received %d coins from wallet %d", tx.Amount, tx.From)
 	c.sendAckToPeer(conn, envelope.TxID, true)
 }
 
@@ -626,7 +621,7 @@ func (c *Client) handleLockGranted(envelope *protocol.Envelope) {
 		return
 	}
 
-	log.Printf("Lock granted for tx %s", granted.TxID)
+	// Lock granted (no log to avoid spam)
 }
 
 func (c *Client) handleStatePushRequest(envelope *protocol.Envelope) {
@@ -706,6 +701,6 @@ func (c *Client) InitiateTransaction(to, amount int) error {
 		return err
 	}
 
-	log.Printf("Transaction %s committed", txID)
+	log.Printf("✓ Sent %d coins to wallet %d", amount, to)
 	return nil
 }

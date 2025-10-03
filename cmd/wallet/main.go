@@ -42,20 +42,19 @@ func main() {
 
 	log.Printf("=== GrimCoin Wallet ===")
 	log.Printf("P2P Port: %s", config.ListenP3)
-	log.Println("Waiting for network discovery...")
 	client, err := wallet.NewClient(config, "data")
 	if err != nil {
 		log.Fatalf("Failed to create wallet client: %v", err)
 	}
 
-	log.Printf("Current balance: %d, version: %d", client.GetBalance(), client.GetVersion())
+	log.Printf("Balance: %d, Version: %d", client.GetBalance(), client.GetVersion())
 	ctx, cancel := context.WithCancel(context.Background())
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		<-sigChan
-		log.Println("Received shutdown signal")
+		log.Println("\nShutting down...")
 		cancel()
 	}()
 
@@ -68,7 +67,7 @@ func main() {
 	go handleCommands(ctx, client)
 
 	<-ctx.Done()
-	log.Println("Wallet shutdown complete")
+	log.Println("Goodbye!")
 }
 func loadConfig(configPath string) (*wallet.Config, error) {
 
@@ -85,7 +84,6 @@ func loadConfig(configPath string) (*wallet.Config, error) {
 		config.ListenP3 = "0.0.0.0:9000"
 	}
 
-	log.Printf("Loaded config from: %s", configPath)
 	return &config, nil
 }
 
