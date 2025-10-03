@@ -203,8 +203,8 @@ func (s *Server) handleObserverConnection(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleObserverHTML(w http.ResponseWriter, r *http.Request) {
-	// Read the observer.html file
-	html := `<!DOCTYPE html>
+	// Generate HTML with embedded public IP
+	html := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
@@ -466,7 +466,7 @@ func (s *Server) handleObserverHTML(w http.ResponseWriter, r *http.Request) {
             connect() {
                 try {
                     // Connect to the controller's public IP
-                    const wsUrl = 'ws://` + s.publicIP + `:8080/ws';
+                    const wsUrl = 'ws://%s:8080/ws';
                     console.log('Connecting to:', wsUrl);
                     this.socket = new WebSocket(wsUrl);
                     
@@ -603,7 +603,7 @@ func (s *Server) handleObserverHTML(w http.ResponseWriter, r *http.Request) {
         });
     </script>
 </body>
-</html>`
+</html>`, s.publicIP)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(html))
