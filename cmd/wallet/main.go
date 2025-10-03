@@ -31,8 +31,14 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Print available network interfaces
-	printNetworkInterfaces()
+	// Check if IP should be selected interactively
+	if os.Getenv("GRIM_IP") == "" {
+		selectedIP, err := selectNetworkInterface()
+		if err != nil {
+			log.Fatalf("Failed to select network interface: %v", err)
+		}
+		os.Setenv("GRIM_IP", selectedIP)
+	}
 
 	log.Printf("=== GrimCoin Wallet ===")
 	log.Printf("P2P Port: %s", config.ListenP3)
@@ -153,13 +159,18 @@ func handleCommands(ctx context.Context, client *wallet.Client) {
 	}
 }
 
-func printNetworkInterfaces() {
-	log.Println("Available network interfaces:")
+type networkInterface struct {
+	name string
+	ip   string
+}
+
+func selectNetworkInterface() (string, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		log.Printf("Failed to get interfaces: %v", err)
-		return
+		return "", fmt.Errorf("failed to get network interfaces: %w", err)
 	}
+
+	var availableIPs []networkInterface
 
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagUp == 0 {
@@ -180,17 +191,75 @@ func printNetworkInterfaces() {
 				ip = v.IP
 			}
 
-			if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
-				private := ""
-				if isPrivateIP(ip) {
-					private = " (private)"
-				}
-				log.Printf("  - %s: %s%s", iface.Name, ip.String(), private)
+			if ip != nil && ip.To4() != nil && !ip.IsLoopback() && isPrivateIP(ip) {
+				availableIPs = append(availableIPs, networkInterface{
+					name: iface.Name,
+					ip:   ip.String(),
+				})
 			}
 		}
 	}
-	log.Println("To use specific IP, set GRIM_IP environment variable")
-	log.Println("")
+
+	if len(availableIPs) == 0 {
+		return "", fmt.Errorf("no suitable network interfaces found")
+	}
+
+	// If only one interface, use it automatically
+	if len(availableIPs) == 1 {
+		log.Printf("Using network interface: %s (%s)", availableIPs[0].name, availableIPs[0].ip)
+		return availableIPs[0].ip, nil
+	}
+
+	// Show available interfaces
+	fmt.Println("\n=== Available Network Interfaces ===")
+	for i, iface := range availableIPs {
+		fmt.Printf("  [%d] %s: %s", i+1, iface.name, iface.ip)
+		// Mark preferred networks
+		ip := net.ParseIP(iface.ip)
+		if ip != nil && (ip[0] == 192 || ip[0] == 10) {
+			fmt.Print(" (recommended)")
+		}
+		fmt.Println()
+	}
+	fmt.Println()
+
+	// Get user choice
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Printf("Select interface [1-%d] or press Enter for auto-select: ", len(availableIPs))
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return "", fmt.Errorf("failed to read input: %w", err)
+		}
+
+		input = strings.TrimSpace(input)
+
+		// Auto-select if empty
+		if input == "" {
+			// Prefer 192.168.x.x and 10.x.x.x
+			for _, iface := range availableIPs {
+				ip := net.ParseIP(iface.ip)
+				if ip != nil && (ip[0] == 192 || ip[0] == 10) {
+					log.Printf("Auto-selected: %s (%s)", iface.name, iface.ip)
+					return iface.ip, nil
+				}
+			}
+			// Return first if no preferred found
+			log.Printf("Auto-selected: %s (%s)", availableIPs[0].name, availableIPs[0].ip)
+			return availableIPs[0].ip, nil
+		}
+
+		// Parse selection
+		choice, err := strconv.Atoi(input)
+		if err != nil || choice < 1 || choice > len(availableIPs) {
+			fmt.Printf("Invalid choice. Please enter a number between 1 and %d.\n", len(availableIPs))
+			continue
+		}
+
+		selected := availableIPs[choice-1]
+		log.Printf("Selected: %s (%s)", selected.name, selected.ip)
+		return selected.ip, nil
+	}
 }
 
 func isPrivateIP(ip net.IP) bool {
