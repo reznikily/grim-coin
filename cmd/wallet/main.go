@@ -615,19 +615,30 @@ func (w *Wallet) handleLockRequest(msg *Message) error {
 	}
 
 	w.lockMu.Lock()
-	defer w.lockMu.Unlock()
-
-	if !w.isLocked {
+	canGrant := !w.isLocked
+	if canGrant {
 		w.isLocked = true
 		w.lockHolder = lockData.NodeID
+	}
+	w.lockMu.Unlock()
 
+	if canGrant {
 		grantMsg := NewMessage(MsgLockGrant, w.profile.ID, w.profile.IP)
 		grantMsg.To = lockData.NodeID
 		grantData, _ := json.Marshal(lockData)
 		grantMsg.Data = grantData
 
-		w.network.SendTo(grantMsg, msg.FromIP)
-		fmt.Printf("Lock granted to %s\n", lockData.NodeID)
+		// Send grant with retries to ensure delivery
+		go func() {
+			for i := 0; i < 5; i++ {
+				w.network.SendTo(grantMsg, msg.FromIP)
+				time.Sleep(200 * time.Millisecond)
+			}
+		}()
+		
+		fmt.Printf("Lock granted to %s (request: %s)\n", lockData.NodeID, lockData.RequestID[:8])
+	} else {
+		fmt.Printf("Lock denied to %s (held by %s)\n", lockData.NodeID, w.lockHolder)
 	}
 
 	return nil
@@ -639,6 +650,8 @@ func (w *Wallet) handleLockGrant(msg *Message) error {
 		return err
 	}
 
+	fmt.Printf("Received lock grant from %s (request: %s)\n", msg.From, lockData.RequestID[:8])
+
 	w.lockMu.RLock()
 	ch, ok := w.pendingLocks[lockData.RequestID]
 	w.lockMu.RUnlock()
@@ -647,7 +660,10 @@ func (w *Wallet) handleLockGrant(msg *Message) error {
 		select {
 		case ch <- true:
 		default:
+			// Channel full or closed, ignore
 		}
+	} else {
+		fmt.Printf("Warning: received grant for unknown request %s\n", lockData.RequestID[:8])
 	}
 
 	return nil
@@ -676,8 +692,6 @@ func (w *Wallet) acquireDistributedLock() (string, error) {
 	}
 
 	data, _ := json.Marshal(lockData)
-	msg := NewMessage(MsgLockRequest, w.profile.ID, w.profile.IP)
-	msg.Data = data
 
 	respCh := make(chan bool, 100)
 	w.lockMu.Lock()
@@ -704,20 +718,40 @@ func (w *Wallet) acquireDistributedLock() (string, error) {
 		return requestID, nil
 	}
 
-	w.network.Broadcast(msg)
+	fmt.Printf("Sending lock requests to %d nodes...\n", len(nodeIPs))
+
+	// Send lock request to each node individually
+	var wg sync.WaitGroup
+	for _, ip := range nodeIPs {
+		wg.Add(1)
+		go func(targetIP string) {
+			defer wg.Done()
+			msg := NewMessage(MsgLockRequest, w.profile.ID, w.profile.IP)
+			msg.Data = data
+			
+			// Send with retry
+			for i := 0; i < 3; i++ {
+				w.network.SendTo(msg, targetIP)
+				time.Sleep(100 * time.Millisecond)
+			}
+		}(ip)
+	}
+	wg.Wait()
 
 	granted := 0
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(10 * time.Second)
 
 	for granted < len(nodeIPs) {
 		select {
 		case <-respCh:
 			granted++
+			fmt.Printf("Lock granted %d/%d\n", granted, len(nodeIPs))
 		case <-timeout:
-			return "", fmt.Errorf("failed to acquire lock from all nodes")
+			return "", fmt.Errorf("failed to acquire lock from all nodes (got %d/%d)", granted, len(nodeIPs))
 		}
 	}
 
+	fmt.Println("All locks granted!")
 	return requestID, nil
 }
 
