@@ -162,7 +162,7 @@ func (nm *NetworkManager) listenLoop() {
 	buffer := make([]byte, BufferSize)
 
 	for {
-		n, _, err := nm.udpConn.ReadFromUDP(buffer)
+		n, remoteAddr, err := nm.udpConn.ReadFromUDP(buffer)
 		if err != nil {
 			continue
 		}
@@ -190,7 +190,8 @@ func (nm *NetworkManager) listenLoop() {
 		}
 
 		if nm.requiresAck(msg.Type) {
-			nm.sendAck(&msg, msg.FromIP)
+			// Use actual remote address from UDP packet
+			nm.sendAck(&msg, remoteAddr.IP.String())
 		}
 	}
 }
