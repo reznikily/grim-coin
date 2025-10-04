@@ -226,7 +226,7 @@ func (nm *NetworkManager) sendAck(original *Message, toIP string) {
 	ackType := MessageType(string(original.Type) + "_ACK")
 	ackMsg := &Message{
 		Type:      ackType,
-		From:      original.To,
+		From:      "",  // ACK doesn't need From
 		FromIP:    nm.localIP,
 		To:        original.From,
 		MessageID: original.MessageID,
@@ -234,12 +234,16 @@ func (nm *NetworkManager) sendAck(original *Message, toIP string) {
 	}
 
 	nm.SendTo(ackMsg, toIP)
+	// Debug log
+	fmt.Printf("[ACK] Sent %s ACK for message %s to %s\n", original.Type, original.MessageID[:16], toIP)
 }
 
 func (nm *NetworkManager) handleAck(messageID string) {
 	nm.ackMu.RLock()
 	ch, ok := nm.ackChannels[messageID]
 	nm.ackMu.RUnlock()
+
+	fmt.Printf("[ACK] Received ACK for message %s (registered: %v)\n", messageID[:16], ok)
 
 	if ok {
 		select {
@@ -793,6 +797,7 @@ func (w *Wallet) sendTransaction(toID string, amount int) error {
 	}
 	w.mu.RUnlock()
 
+	fmt.Printf("Target nodes for transaction: %v\n", nodeIPs)
 	fmt.Println("Acquiring distributed lock...")
 
 	_, err := w.acquireDistributedLock()
@@ -814,6 +819,7 @@ func (w *Wallet) sendTransaction(toID string, amount int) error {
 	txMsg := NewMessage(MsgTransaction, w.profile.ID, w.profile.IP)
 	txMsg.Data = data
 
+	fmt.Printf("Broadcasting transaction to %d nodes: %v\n", len(nodeIPs), nodeIPs)
 	if err := w.network.BroadcastWithRetry(txMsg, nodeIPs, MaxRetries); err != nil {
 		return fmt.Errorf("failed to broadcast transaction: %v", err)
 	}
