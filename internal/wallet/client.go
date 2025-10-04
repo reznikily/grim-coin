@@ -396,6 +396,8 @@ func (c *Client) handleMessages(ctx context.Context) {
 			c.handleLockGranted(&envelope)
 		case protocol.MsgTypeStatePushRequest:
 			c.handleStatePushRequest(&envelope)
+		case protocol.MsgTypeNetworkSync:
+			c.handleNetworkSync(&envelope)
 		default:
 			log.Printf("Unknown message type: %s", envelope.Type)
 		}
@@ -655,6 +657,21 @@ func (c *Client) handleStatePushRequest(envelope *protocol.Envelope) {
 			log.Printf("Failed to send state push response: %v", err)
 		}
 	}
+}
+
+func (c *Client) handleNetworkSync(envelope *protocol.Envelope) {
+	var sync protocol.NetworkSyncPayload
+	if err := envelope.ParsePayload(&sync); err != nil {
+		log.Printf("Failed to parse network sync payload: %v", err)
+		return
+	}
+
+	if err := c.ledger.SyncWithNetwork(sync.Balances, sync.Version); err != nil {
+		log.Printf("Failed to sync with network: %v", err)
+		return
+	}
+
+	log.Printf("Synced with network: %d wallets, version %d", len(sync.Balances), sync.Version)
 }
 
 func (c *Client) InitiateTransaction(to, amount int) error {

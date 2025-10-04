@@ -39,6 +39,11 @@ type AckPayload struct {
 	Success     bool   `json:"success"`
 	Message     string `json:"message,omitempty"`
 }
+
+type NetworkSyncPayload struct {
+	Balances map[int]int `json:"balances"`
+	Version  int         `json:"version"`
+}
 type ErrorPayload struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -78,6 +83,7 @@ const (
 	MsgTypeHello            = "hello"
 	MsgTypeStateUpdate      = "state_update"
 	MsgTypeNetworkState     = "network_state"
+	MsgTypeNetworkSync      = "network_sync"
 	MsgTypeAck              = "ack"
 	MsgTypeError            = "error"
 	MsgTypeLockRequest      = "lock_request"

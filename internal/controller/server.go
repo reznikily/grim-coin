@@ -180,6 +180,10 @@ func (s *Server) handleHelloMessage(envelope *protocol.Envelope, conn *websocket
 
 	log.Printf("Wallet %d (%s) connected with balance %d, version %d",
 		hello.ID, hello.Name, hello.Balance, hello.Version)
+	
+	// Send network sync to the newly connected wallet
+	s.sendNetworkSync(conn, envelope.SenderID)
+	
 	s.sendAck(conn, envelope.SenderID, protocol.MsgTypeHello, true, "welcome")
 	s.broadcastNetworkState()
 }
@@ -338,6 +342,37 @@ func (s *Server) sendError(conn *websocket.Conn, walletID int, code string, mess
 
 	if err := conn.WriteJSON(envelope); err != nil {
 		log.Printf("Failed to send error to wallet %d: %v", walletID, err)
+	}
+}
+
+func (s *Server) sendNetworkSync(conn *websocket.Conn, walletID int) {
+	s.mutex.RLock()
+	balances := make(map[int]int)
+	maxVersion := 0
+	
+	for id, wallet := range s.wallets {
+		balances[id] = wallet.Balance
+		if wallet.Version > maxVersion {
+			maxVersion = wallet.Version
+		}
+	}
+	s.mutex.RUnlock()
+
+	syncPayload := protocol.NetworkSyncPayload{
+		Balances: balances,
+		Version:  maxVersion,
+	}
+
+	envelope, err := protocol.CreateEnvelope(protocol.MsgTypeNetworkSync, 0, syncPayload)
+	if err != nil {
+		log.Printf("Failed to create network sync envelope: %v", err)
+		return
+	}
+
+	if err := conn.WriteJSON(envelope); err != nil {
+		log.Printf("Failed to send network sync to wallet %d: %v", walletID, err)
+	} else {
+		log.Printf("Sent network sync to wallet %d: %d wallets, version %d", walletID, len(balances), maxVersion)
 	}
 }
 

@@ -155,3 +155,20 @@ func (l *Ledger) ApplyTransaction(from, to, amount, expectedVersion int) error {
 
 	return l.Save()
 }
+
+func (l *Ledger) SyncWithNetwork(balances map[int]int, version int) error {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+
+	// Only sync if network version is higher or equal
+	if version >= l.Version {
+		l.Balances = make(map[int]int)
+		for id, balance := range balances {
+			l.Balances[id] = balance
+		}
+		l.Version = version
+		return l.Save()
+	}
+
+	return nil
+}
