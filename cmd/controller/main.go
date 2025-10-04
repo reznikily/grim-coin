@@ -101,13 +101,15 @@ type MessageHandler func(*Message) error
 
 // Controller represents the network controller
 type Controller struct {
-	table       NetworkTable
-	network     *NetworkManager
-	mu          sync.RWMutex
-	wsClients   map[*websocket.Conn]bool
-	wsClientsMu sync.RWMutex
-	wsUpgrader  websocket.Upgrader
-	localIP     string
+	table          NetworkTable
+	network        *NetworkManager
+	mu             sync.RWMutex
+	wsClients      map[*websocket.Conn]bool
+	wsClientsMu    sync.RWMutex
+	wsUpgrader     websocket.Upgrader
+	localIP        string
+	processedTxs   map[string]bool
+	processedTxsMu sync.RWMutex
 }
 
 // NewMessage creates a new message
@@ -375,7 +377,8 @@ func NewController(localIP string) (*Controller, error) {
 				return true
 			},
 		},
-		localIP: localIP,
+		localIP:      localIP,
+		processedTxs: make(map[string]bool),
 	}
 
 	nm, err := NewNetworkManager(localIP)
@@ -476,8 +479,18 @@ func (c *Controller) handleTransaction(msg *Message) error {
 		return err
 	}
 
+	// Check if transaction already processed
+	c.processedTxsMu.Lock()
+	if c.processedTxs[txData.TxID] {
+		c.processedTxsMu.Unlock()
+		fmt.Printf("Skipping duplicate transaction: %s\n", txData.TxID[:8])
+		return nil
+	}
+	c.processedTxs[txData.TxID] = true
+	c.processedTxsMu.Unlock()
+
 	fmt.Printf("Received transaction: %s -> %s: %d coins (TX: %s)\n",
-		txData.From, txData.To, txData.Amount, txData.TxID)
+		txData.From, txData.To, txData.Amount, txData.TxID[:8])
 
 	c.mu.Lock()
 	if fromWallet, ok := c.table.Wallets[txData.From]; ok {

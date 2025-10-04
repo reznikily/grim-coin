@@ -115,14 +115,16 @@ type MessageHandler func(*Message) error
 
 // Wallet represents a wallet node in the network
 type Wallet struct {
-	profile      Profile
-	table        NetworkTable
-	network      *NetworkManager
-	mu           sync.RWMutex
-	isLocked     bool
-	lockHolder   string
-	pendingLocks map[string]chan bool
-	lockMu       sync.RWMutex
+	profile         Profile
+	table           NetworkTable
+	network         *NetworkManager
+	mu              sync.RWMutex
+	isLocked        bool
+	lockHolder      string
+	pendingLocks    map[string]chan bool
+	lockMu          sync.RWMutex
+	processedTxs    map[string]bool
+	processedTxsMu  sync.RWMutex
 }
 
 // NewMessage creates a new message
@@ -419,6 +421,7 @@ func NewWallet() (*Wallet, error) {
 			Version: 0,
 		},
 		pendingLocks: make(map[string]chan bool),
+		processedTxs: make(map[string]bool),
 	}
 
 	if _, err := os.Stat(ProfileFile); err == nil {
@@ -588,8 +591,18 @@ func (w *Wallet) handleTransaction(msg *Message) error {
 		return err
 	}
 
+	// Check if transaction already processed
+	w.processedTxsMu.Lock()
+	if w.processedTxs[txData.TxID] {
+		w.processedTxsMu.Unlock()
+		fmt.Printf("Skipping duplicate transaction: %s\n", txData.TxID[:8])
+		return nil
+	}
+	w.processedTxs[txData.TxID] = true
+	w.processedTxsMu.Unlock()
+
 	fmt.Printf("Received transaction: %s -> %s: %d coins (TX: %s)\n",
-		txData.From, txData.To, txData.Amount, txData.TxID)
+		txData.From, txData.To, txData.Amount, txData.TxID[:8])
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
