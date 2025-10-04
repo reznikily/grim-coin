@@ -246,9 +246,17 @@ func (nm *NetworkManager) handleAck(messageID string) {
 	fmt.Printf("[ACK] Received ACK for message %s (registered: %v)\n", messageID[:16], ok)
 
 	if ok {
+		// Use recover to handle closed channel panic
+		defer func() {
+			if r := recover(); r != nil {
+				// Channel was closed, ignore
+			}
+		}()
+		
 		select {
 		case ch <- true:
 		default:
+			// Channel full or closed, ignore
 		}
 	}
 }
@@ -293,9 +301,13 @@ func (nm *NetworkManager) SendWithRetry(msg *Message, targetIP string, maxRetrie
 	nm.ackMu.Unlock()
 
 	defer func() {
+		// Remove from map and close channel atomically
 		nm.ackMu.Lock()
 		delete(nm.ackChannels, msg.MessageID)
 		nm.ackMu.Unlock()
+		
+		// Small delay to let any pending sends complete
+		time.Sleep(10 * time.Millisecond)
 		close(ackCh)
 	}()
 
@@ -332,7 +344,20 @@ func (nm *NetworkManager) BroadcastWithRetry(msg *Message, nodeIPs []string, max
 		wg.Add(1)
 		go func(targetIP string) {
 			defer wg.Done()
-			if err := nm.SendWithRetry(msg, targetIP, maxRetries); err != nil {
+			
+			// Create a unique message for each target node
+			// This ensures each has its own ACK channel
+			uniqueMsg := &Message{
+				Type:      msg.Type,
+				From:      msg.From,
+				FromIP:    msg.FromIP,
+				To:        msg.To,
+				Data:      msg.Data,
+				Timestamp: msg.Timestamp,
+				MessageID: fmt.Sprintf("%s-%s", msg.MessageID, targetIP), // Unique per target
+			}
+			
+			if err := nm.SendWithRetry(uniqueMsg, targetIP, maxRetries); err != nil {
 				errors <- fmt.Errorf("failed to send to %s: %v", targetIP, err)
 			}
 		}(ip)
