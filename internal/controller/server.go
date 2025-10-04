@@ -29,20 +29,22 @@ type LockState struct {
 }
 
 type Server struct {
-	wallets      map[int]*WalletInfo
-	observers    []*websocket.Conn
-	mutex        sync.RWMutex
-	upgrader     websocket.Upgrader
-	lockState    *LockState
-	lockMutex    sync.Mutex
-	statePushMap map[string]map[int]*protocol.StatePushResponsePayload
+	wallets        map[int]*WalletInfo
+	observers      []*websocket.Conn
+	observerMutexes map[*websocket.Conn]*sync.Mutex
+	mutex          sync.RWMutex
+	upgrader       websocket.Upgrader
+	lockState      *LockState
+	lockMutex      sync.Mutex
+	statePushMap   map[string]map[int]*protocol.StatePushResponsePayload
 }
 
 func NewServer() *Server {
 	return &Server{
-		wallets:      make(map[int]*WalletInfo),
-		observers:    make([]*websocket.Conn, 0),
-		statePushMap: make(map[string]map[int]*protocol.StatePushResponsePayload),
+		wallets:         make(map[int]*WalletInfo),
+		observers:       make([]*websocket.Conn, 0),
+		observerMutexes: make(map[*websocket.Conn]*sync.Mutex),
+		statePushMap:    make(map[string]map[int]*protocol.StatePushResponsePayload),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
@@ -202,6 +204,7 @@ func (s *Server) addObserver(conn *websocket.Conn) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	s.observers = append(s.observers, conn)
+	s.observerMutexes[conn] = &sync.Mutex{}
 }
 func (s *Server) removeObserver(conn *websocket.Conn) {
 	s.mutex.Lock()
@@ -210,14 +213,13 @@ func (s *Server) removeObserver(conn *websocket.Conn) {
 	for i, observer := range s.observers {
 		if observer == conn {
 			s.observers = append(s.observers[:i], s.observers[i+1:]...)
+			delete(s.observerMutexes, conn)
 			break
 		}
 	}
 }
 func (s *Server) markWalletOffline(conn *websocket.Conn) {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
 	for _, wallet := range s.wallets {
 		if wallet.Conn == conn {
 			wallet.Status = "offline"
@@ -226,7 +228,10 @@ func (s *Server) markWalletOffline(conn *websocket.Conn) {
 			break
 		}
 	}
-	go s.broadcastNetworkState()
+	s.mutex.Unlock()
+	
+	// Broadcast synchronously (removed 'go')
+	s.broadcastNetworkState()
 }
 func (s *Server) broadcastNetworkState() {
 	s.mutex.RLock()
@@ -257,11 +262,47 @@ func (s *Server) broadcastNetworkState() {
 		return
 	}
 	
-	// Broadcasting network state to observers
+	// Broadcasting network state to observers with write timeout and concurrent write protection
+	var failedObservers []*websocket.Conn
 	for _, observer := range observersCopy {
+		// Get mutex for this observer
+		s.mutex.RLock()
+		mutex, exists := s.observerMutexes[observer]
+		s.mutex.RUnlock()
+		
+		if !exists {
+			continue
+		}
+		
+		// Lock to prevent concurrent writes to same connection
+		mutex.Lock()
+		
+		// Set write deadline (10 seconds timeout)
+		observer.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		
 		if err := observer.WriteJSON(envelope); err != nil {
 			log.Printf("Failed to send network state to observer: %v", err)
+			failedObservers = append(failedObservers, observer)
 		}
+		
+		mutex.Unlock()
+	}
+	
+	// Remove dead observers
+	if len(failedObservers) > 0 {
+		s.mutex.Lock()
+		for _, failed := range failedObservers {
+			for i, observer := range s.observers {
+				if observer == failed {
+					s.observers = append(s.observers[:i], s.observers[i+1:]...)
+					delete(s.observerMutexes, failed)
+					failed.Close()
+					log.Printf("Removed dead observer connection")
+					break
+				}
+			}
+		}
+		s.mutex.Unlock()
 	}
 }
 func (s *Server) sendAck(conn *websocket.Conn, walletID int, messageType string, success bool, message string) {

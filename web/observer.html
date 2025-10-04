@@ -262,6 +262,12 @@
 
             connect() {
                 try {
+                    // Close existing socket if any
+                    if (this.socket) {
+                        this.socket.close();
+                        this.socket = null;
+                    }
+                    
                     // Пытаемся подключиться к WebSocket серверу контроллера
                     const wsUrl = 'ws://10.92.28.89:8080/ws';
                     this.socket = new WebSocket(wsUrl);
@@ -286,7 +292,10 @@
                     this.socket.onclose = (event) => {
                         console.log('Connection closed:', event);
                         this.setStatus('disconnected', '❌ Соединение разорвано');
-                        this.scheduleReconnect();
+                        // Only reconnect if not a normal closure (code 1000) or going away (code 1001)
+                        if (event.code !== 1000 && event.code !== 1001) {
+                            this.scheduleReconnect();
+                        }
                     };
                     
                     this.socket.onerror = (error) => {
@@ -324,12 +333,28 @@
             }
 
             updateNetworkState(payload) {
-                this.nodes = payload.nodes || [];
+                // Validate payload
+                if (!payload || !Array.isArray(payload.nodes)) {
+                    console.error('Invalid network state payload:', payload);
+                    this.showError('Получены некорректные данные от контроллера');
+                    return;
+                }
+                
+                this.nodes = payload.nodes;
                 this.renderNodesTable();
                 this.updateMetrics();
                 
-                const timestamp = new Date(payload.timestamp);
-                this.lastUpdateElement.textContent = `Последнее обновление: ${timestamp.toLocaleString('ru-RU')}`;
+                // Validate and parse timestamp
+                try {
+                    const timestamp = new Date(payload.timestamp);
+                    if (isNaN(timestamp.getTime())) {
+                        throw new Error('Invalid timestamp');
+                    }
+                    this.lastUpdateElement.textContent = `Последнее обновление: ${timestamp.toLocaleString('ru-RU')}`;
+                } catch (error) {
+                    console.error('Failed to parse timestamp:', error);
+                    this.lastUpdateElement.textContent = 'Последнее обновление: неизвестно';
+                }
             }
 
             renderNodesTable() {

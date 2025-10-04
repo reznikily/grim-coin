@@ -609,9 +609,16 @@ func (c *Client) sendAckToPeer(conn *websocket.Conn, txID string, success bool) 
 		Success:     success,
 	}
 	
-	env, _ := protocol.CreateEnvelope(protocol.MsgTypeAck, c.profile.ID, ack)
+	env, err := protocol.CreateEnvelope(protocol.MsgTypeAck, c.profile.ID, ack)
+	if err != nil {
+		log.Printf("Failed to create ack envelope: %v", err)
+		return
+	}
 	env.TxID = txID
-	conn.WriteJSON(env)
+	
+	if err := conn.WriteJSON(env); err != nil {
+		log.Printf("Failed to send ack to peer: %v", err)
+	}
 }
 
 func (c *Client) handleLockGranted(envelope *protocol.Envelope) {
@@ -632,7 +639,11 @@ func (c *Client) handleStatePushRequest(envelope *protocol.Envelope) {
 		Version:  version,
 	}
 	
-	env, _ := protocol.CreateEnvelope(protocol.MsgTypeStatePushResponse, c.profile.ID, resp)
+	env, err := protocol.CreateEnvelope(protocol.MsgTypeStatePushResponse, c.profile.ID, resp)
+	if err != nil {
+		log.Printf("Failed to create state push response envelope: %v", err)
+		return
+	}
 	env.TxID = envelope.TxID
 	
 	c.mutex.RLock()
@@ -640,7 +651,9 @@ func (c *Client) handleStatePushRequest(envelope *protocol.Envelope) {
 	c.mutex.RUnlock()
 	
 	if conn != nil {
-		conn.WriteJSON(env)
+		if err := conn.WriteJSON(env); err != nil {
+			log.Printf("Failed to send state push response: %v", err)
+		}
 	}
 }
 
@@ -686,11 +699,20 @@ func (c *Client) InitiateTransaction(to, amount int) error {
 	}
 	c.peerMutex.RUnlock()
 
+	// Send to peers concurrently with WaitGroup
+	var wg sync.WaitGroup
 	for _, peer := range peers {
-		if err := peer.WriteJSON(txEnv); err != nil {
-			log.Printf("Failed to send transaction to peer: %v", err)
-		}
+		wg.Add(1)
+		go func(p *websocket.Conn) {
+			defer wg.Done()
+			if err := p.WriteJSON(txEnv); err != nil {
+				log.Printf("Failed to send transaction to peer: %v", err)
+			}
+		}(peer)
 	}
+	
+	// Wait for all sends to complete
+	wg.Wait()
 
 	time.Sleep(1 * time.Second)
 
